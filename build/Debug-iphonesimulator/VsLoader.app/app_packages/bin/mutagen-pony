@@ -1,0 +1,9 @@
+#!/bin/sh
+'''exec' /Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14 "$0" "$@"
+' '''
+import sys
+from mutagen._tools.mutagen_pony import entry_point
+if __name__ == '__main__':
+    if sys.argv[0].endswith('.exe'):
+        sys.argv[0] = sys.argv[0][:-4]
+    sys.exit(entry_point())
