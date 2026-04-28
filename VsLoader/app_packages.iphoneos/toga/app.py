@@ -202,7 +202,7 @@ class App:
             app can manage.
         """
         # Sets Python's locale settings to the language settings of the system.
-        locale.setlocale(locale.LC_ALL, "")
+        #locale.setlocale(locale.LC_ALL, "")
 
         # Initialize empty widgets registry
         self._widgets = WidgetRegistry()
