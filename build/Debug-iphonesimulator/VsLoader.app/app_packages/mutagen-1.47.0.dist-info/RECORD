@@ -1,9 +1,9 @@
-../../bin/mid3cp,sha256=lhK8ggCiWdqIROaMyo6ih3-1Ohvcdt2GC_No0MilWj8,289
-../../bin/mid3iconv,sha256=3lOUN3jKJwGHElNeAtT1cgv9nX39bgBIQh3qWCP6F24,292
-../../bin/mid3v2,sha256=M6Qwbq6XfPknntbKyqy7I_R450sjda3Ipw6nQgkl3_4,289
-../../bin/moggsplit,sha256=0Div21rRr87sHpWVzAsJT9KoQpb1awOyfUxrL-b4dxY,292
-../../bin/mutagen-inspect,sha256=F1WhJvcPIbDSp6tE8Vr4lfOyMrBdAX1zA3fOqiwloI4,298
-../../bin/mutagen-pony,sha256=6-j8FG7VN3BHwj9xWBuiP4vjONIif7r-TdKSBAr2Ptc,295
+../../bin/mid3cp,sha256=1NpK4Fz8qJ3WTDr60tleZ4RuEJ4b3OtKNrEmc8d9hKo,261
+../../bin/mid3iconv,sha256=kK4Il7UUs693isi3LwchGO90WrhBgDLCtM-WT1KIg5I,264
+../../bin/mid3v2,sha256=JTvq27SAFCaoI2Bmwb2M3LgPVguCebKpsykvkccSn7k,261
+../../bin/moggsplit,sha256=FYxMDqSo3CzgMy27u0UUN_MHg202i08W50o7wFI4U8g,264
+../../bin/mutagen-inspect,sha256=boHiL7kOQ5PF6zvtbS7yc8DZoVuA6qBfFoboC-bndJY,270
+../../bin/mutagen-pony,sha256=p-XSYzqM1S47Jvtnpr379sp6z9-Yo17ZnSgQG7zyHp8,267
 ../../share/man/man1/mid3cp.1,sha256=b3BLq2KQGmgZO5XyiWRkraQmT-hSN6FLplinjRtopg0,1739
 ../../share/man/man1/mid3iconv.1,sha256=BxoSX8eFILegJPhGPgYj1Y7BddlLq2qe4yyGTKZfxtc,1551
 ../../share/man/man1/mid3v2.1,sha256=p1mx1TDKGq5sCqiXJXB53gi0yZaoLrcKOC0MATrhvq0,5163

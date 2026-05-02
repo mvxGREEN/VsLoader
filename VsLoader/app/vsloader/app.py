@@ -1,5 +1,5 @@
 """
-Video Downloader for iOS
+VSCO Downloader for iOS
 """
 
 import toga
@@ -35,7 +35,7 @@ def get_dest_path():
         return os.path.join(os.path.expanduser('~'), 'Documents') + "/"
     elif sys.platform == 'win32':
         print("Running on Windows.")
-        return "C:\\Users\\maxwe\\Videos\\SaveFrom\\v8\\"
+        return "C:\\Users\\maxwe\\VsLoader\\"
     elif sys.platform == 'android':
         print("Running on Android.")
         return "/storage/emulated/0/Documents/"
@@ -44,7 +44,7 @@ def get_dest_path():
         return str(Path.home() / "Downloads") + "/"
     else:
         print(f"Running on a different platform: {sys.platform}\nReturning default path_out (windows)")
-        return "C:\\Users\\maxwe\\StudioProjects\\savefrom-video-downloader\\"
+        return "C:\\Users\\maxwe\\StudioProjects\\vsloader\\"
 
 
 def sanitize_filename(filename):
@@ -73,54 +73,26 @@ def sanitize_filename(filename):
     return filename
 
 
-# 'outtmpl': out + '%(title).25s.%(ext)s',
-# example formats
-# 'format': "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-# 'format': "bestvideo[height<=" + resolution + "], bestaudio",
-# 'format': "bestvideo[height<=" + resolution + "]+bestaudio/bestvideo[height<=" + resolution + "]/best[height<=" + resolution + "]",
-async def dl_video_async(video_url, out, filename, resolution, progress_hook):
-    # find ffmpeg on mobile
-    ff_dir_path = ''
-    if sys.platform == 'ios':
-        file___path = os.path.realpath(__file__)
-        file___dir_path = file___path[:file___path.rfine('/')]
-        ff_dir_path = os.path.join(file___dir_path, 'ffmpeg', 'bin')
-    elif sys.platform == 'android':
-        # TODO find ffmpeg on android
-        print(f'TODO find ffmpeg location on android')
-    print(f'ff_dir_path: {ff_dir_path}')
-
-    # set youtubedl options
-    ydl_opts = {
-        'format': "bestvideo[height<=" + resolution + "]+bestaudio/bestvideo[height<=" + resolution + "]/best[height<=" + resolution + "]",
-        'outtmpl': out + filename + '.%(ext)s',
-        'restrictfilenames': True,
-        "cachedir": False,
-        "ignoreerrors": True,
-        'progress_hooks': [progress_hook],
-        'ffmpeg_location': ff_dir_path,
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        # Use asyncio.to_thread to run the blocking download in a separate thread
-        await asyncio.to_thread(ydl.download, video_url)
-        # return info_dict['format_id']
+def validate_url(value):
+    """Custom Toga validator to check for valid HTTP/HTTPS URLs."""
+    if not value:
+        return  # Allow empty (matches your current allow_empty=True behavior)
+    
+    # Standard regex for robust URL validation
+    url_pattern = re.compile(r"^https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)$")
+    
+    if not url_pattern.match(value):
+        raise ValueError("Please paste a valid URL")
 
 
-async def extract_video_info(video_url, resolution):
-    # prevent overwrite with random id
-    ydl_opts = {
-        'format': "bestvideo[height<=" + resolution + "]+bestaudio/bestvideo[height<=" + resolution + "]/best[height<=" + resolution + "]",
-        'restrictfilenames': True,
-        "cachedir": False,
-        "ignoreerrors": True,
-    }
+async def dl_vsco_async(vsco_url, out, filename, resolution, progress_hook):
+    print("starting dl_vsco_async")
+    # TODO download photo, video, profile or gallery
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info_dict = await asyncio.to_thread(ydl.extract_info, video_url, False)
-        video_info = f"{info_dict['title']}|||{info_dict['ext']}|||{info_dict['thumbnail']}"
-        print(f"video_info={video_info}")
-        return video_info
+
+async def extract_vsco_info(vsco_url, resolution):
+    print("starting dl_vsco_async")
+    # TODO load media info at URL
 
 
 async def create_progress_hook(progress_bar):
@@ -131,13 +103,12 @@ async def create_progress_hook(progress_bar):
     def progress_hook(d):
         if d['status'] == 'downloading':
             if d.get('total_bytes') and d.get('downloaded_bytes'):
-                print("has total_bytes and downloaded_bytes")
-                # calculate progress
-                percent_float = (d['downloaded_bytes'] / d['total_bytes']) * 100
-                percent_int = int(percent_float)
-                # update progress
-                # progress_bar.value = percent_int
-                print(f"Download Progress: {percent_int}%")
+                percent_int = int((d['downloaded_bytes'] / d['total_bytes']) * 100)
+                
+                # Safely update the UI on the main thread
+                progress_bar.app.loop.call_soon_threadsafe(
+                    lambda: setattr(progress_bar, 'value', percent_int)
+                )
             elif d.get('fragment_index') and d.get('fragment_count'):
                 # calculate progress
                 percent_float = (d['fragment_index'] / d['fragment_count']) * 100
@@ -188,19 +159,56 @@ class VsLoader(toga.App):
                                         on_confirm=self.load_input,
                                         on_change=self.input_change,
                                         flex=1,
-                                        validators=[StartsWith("https://", error_message="Please paste a valid URL", allow_empty=True),
-                                                    MinLength(15, error_message="Please paste a valid URL", allow_empty=True),
-        ])
-        self.load_button = toga.Button(
-            "Load",
-            direction=ROW,
-            on_press=self.load_input,
+                                        validators=[validate_url],
+                                        style=Pack(height=45))
+        # paste button
+        self.paste_button = toga.Button(
+            icon=toga.Icon("resources/bolt_64"),
+            on_press=self.paste_and_load,
             margin=(0, 0, 0, 4),
+            style=Pack(width=45) # Forces the button to remain comfortably wide
         )
-        self.load_button.style.visibility = 'visible'
+        self.paste_button.style.visibility = 'visible'
+
+        # --- iOS Native UI Enhancements ---
+        import sys
+        if sys.platform == 'ios':
+            try:
+                from rubicon.objc import ObjCClass
+                UIImage = ObjCClass("UIImage")
+                UIColor = ObjCClass("UIColor")
+                UIImageSymbolConfiguration = ObjCClass("UIImageSymbolConfiguration")
+                
+                # Access the underlying native iOS UIButton
+                native_btn = self.paste_button._impl.native
+                
+                # 1. Create a configuration to scale up the SF Symbol.
+                # A point size of ~28.0 matches standard iOS text inputs well.
+                symbol_config = UIImageSymbolConfiguration.configurationWithPointSize(28.0)
+                
+                # 2. Apply the configuration when loading the vector image
+                bolt_image = UIImage.systemImageNamed("bolt.fill", withConfiguration=symbol_config)
+                
+                # 3. Create a yellow version for the active press state
+                yellow_color = UIColor.systemYellowColor()
+                yellow_bolt = bolt_image.imageWithTintColor(yellow_color, renderingMode=1)
+                
+                # 4. Apply states to the native button
+                native_btn.setImage(bolt_image, forState=0)
+                native_btn.setImage(yellow_bolt, forState=1)
+                native_btn.setTitle("", forState=0)
+                
+            except Exception as e:
+                print(f"Could not apply iOS native button styling: {e}")
+        # ----------------------------------
+        
         self.url_box = toga.Box(margin=(0, 8))
         self.url_box.add(self.url_input)
-        self.url_box.add(self.load_button)
+        self.url_box.add(self.paste_button)
+        
+        self.url_box = toga.Box(margin=(0, 8))
+        self.url_box.add(self.url_input)
+        self.url_box.add(self.paste_button)
 
         # main box
         self.main_box.add(self.hint_box)
@@ -270,16 +278,15 @@ class VsLoader(toga.App):
         self.download_button.text = "Download"
         self.download_button.enabled = True
 
-        # update load button
-        self.load_button.text = "Loading…"
-        self.load_button.enabled = False
+        # update paste button
+        self.paste_button.enabled = False
 
         # show indeterminate progressbar
         self.progress.max = None
         self.progress.style.visibility = 'visible'
         self.progress.start()
 
-    def show_preview_layout(self, filename, thumbnail_url):
+    async def show_preview_layout(self, filename, thumbnail_url):
         print("show_preview_layout")
 
         # convert webp thumbnail urls to jpg
@@ -290,8 +297,8 @@ class VsLoader(toga.App):
         try:
             print(f"loading thumbnail_url: {thumbnail_url}")
 
-            # load thumbnail into imageviewL
-            response = requests.get(thumbnail_url)
+            # Push the blocking network request to a background thread
+            response = await asyncio.to_thread(requests.get, thumbnail_url)
             response.raise_for_status()  # Raise an exception for bad status codes
             image_bytes = BytesIO(response.content)
             toga_image = toga.Image(src=image_bytes.read())
@@ -305,9 +312,8 @@ class VsLoader(toga.App):
             # enable url textinput
             self.url_input.enabled = True
 
-            # reset loading widgets
-            self.load_button.text = "Load"
-            self.load_button.enabled = True
+            # enable paste button
+            self.paste_button.enabled = True
 
             # enable textinputs
             self.filename_input.enabled = True
@@ -332,7 +338,7 @@ class VsLoader(toga.App):
         self.download_button.text = "Downloading…"
 
         # disable buttons
-        self.load_button.enabled = False
+        self.paste_button.enabled = False
         self.download_button.enabled = False
 
         # disable textinputs
@@ -352,37 +358,94 @@ class VsLoader(toga.App):
             self.filename_input_label.style.visibility = 'hidden'
             self.filename_input.style.visibility = 'hidden'
             self.download_button.style.visibility = 'hidden'
+        else:
+            # Regex pattern to ensure the string is actually a safe, valid URL
+            url_pattern = re.compile(r"^https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)$")
+            
+            # Auto-trigger if the typed/pasted text is fully valid
+            if url_pattern.match(self.url_input.value):
+                asyncio.create_task(self.load_input(widget))
+            
+    def get_clipboard_text(self):
+        """Cross-platform helper to grab text from the system clipboard."""
+        import sys
+        if sys.platform == 'ios':
+            try:
+                from rubicon.objc import ObjCClass
+                UIPasteboard = ObjCClass("UIPasteboard")
+                pb = UIPasteboard.generalPasteboard
+                # pb.string returns an NSString, so we cast it to a standard Python str
+                return str(pb.string) if pb.string else ""
+            except Exception as e:
+                print(f"Error reading iOS clipboard: {e}")
+                return ""
+        else:
+            # Fallback for Desktop environments
+            try:
+                import pyperclip
+                return pyperclip.paste()
+            except ImportError:
+                print("Install 'pyperclip' (pip install pyperclip) to test clipboard on desktop.")
+                return ""
+
+    async def paste_and_load(self, widget):
+        """Action for the lightning button."""
+        clip_text = self.get_clipboard_text()
+        if clip_text:
+            # Updating the value automatically fires the input_change event!
+            self.url_input.value = clip_text
 
     async def load_input(self, widget):
+        # Guard clause: Prevent double-triggering
+        if not self.url_input.enabled:
+            return
+
         # hide keyboard
         self.app.main_window.content = self.app.main_window.content
 
-        # validate input
-        if "https://" in self.url_input.value and self.url_input.value.count("/") >= 3:
+        # URL validation regex pattern
+        url_pattern = re.compile(r"^https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)$")
+
+        # validate input with regex
+        if self.url_input.value and url_pattern.match(self.url_input.value):
             # show loading ui
             self.show_loading_layout()
 
-            # load video info asynchronously
-            load_task = asyncio.create_task(
-                extract_video_info(f"{self.url_input.value}", "2160"))
-            info = await load_task
+            try:
+                # load media info asynchronously
+                load_task = asyncio.create_task(
+                    extract_vsco_info(f"{self.url_input.value}", "2160"))
+                info = await load_task
 
-            # format file info
-            filename_id = f"{random.randint(0, 9)}{random.randint(0, 9)}{random.randint(0, 9)}{random.randint(0, 9)}_"
-            index_div1 = info.index("|||")
-            index_div2 = info.rindex("|||")
-            title = info[:index_div1]
-            filename = filename_id + sanitize_filename(title[0:23])
-            ext = info[index_div1 + 3:index_div2]
-            thumbnail_url = info[index_div2 + 3:]
-            print(f"loaded video info:\ntitle={title}\nfilename={filename}\next={ext}\nthumbnail_url={thumbnail_url}")
+                title = info["title"]
+                ext = info["ext"]
+                thumbnail_url = info["thumbnail"]
+                filename = sanitize_filename(title[0:23])
 
-            self.show_preview_layout(filename, thumbnail_url)
+                await self.show_preview_layout(filename, thumbnail_url)
+                
+            except Exception as e:
+                # 1. Log the previously swallowed exception!
+                print(f"Extraction Error: {e}")
+                
+                # 2. Reset the UI so it doesn't get stuck
+                self.url_input.enabled = True
+                self.paste_button.enabled = True
+                self.progress.stop()
+                self.progress.style.visibility = 'hidden'
+                
+                # 3. Alert the user
+                self.main_window.dialog(
+                    toga.InfoDialog(
+                        "Extraction Failed",
+                        "Could not load preview"
+                    )
+                )
         else:
             self.main_window.dialog(
                 toga.InfoDialog(
                     "Error: Invalid URL",
-                    "Please paste a video URL"
+                    "Please paste a valid URL"
                 )
             )
 
@@ -413,9 +476,10 @@ class VsLoader(toga.App):
         # show finished layout
         self.download_button.text = "Finished!"
         self.url_input.enabled = True
-        self.load_button.enabled = True
+        self.paste_button.enabled = True
         print("finished showing finished layout!")
 
 
-async def main():
+def main():
     return VsLoader()
+
