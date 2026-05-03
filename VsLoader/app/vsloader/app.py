@@ -9,8 +9,8 @@ from asyncio import TaskGroup
 import io
 import json
 import contextlib
-import gallery_dl
 import re
+from urllib.parse import unquote
 import random
 import sys
 import os
@@ -90,99 +90,171 @@ def validate_url(value):
 
 async def extract_vsco_info(vsco_url, resolution):
     """
-    Extracts metadata from a VSCO URL using gallery-dl's DataJob.
-    Includes shortlink resolution and debug logging.
+    Extracts VSCO media directly from HTML using curl_cffi
+    to bypass Cloudflare TLS fingerprinting blocks.
     """
-    print(f"starting extract_vsco_info for: {vsco_url}")
+    print(f"Starting HTML extraction for: {vsco_url}")
     
     def extract():
-        # 1. Resolve shortlinks (vs.co -> vsco.co)
         target_url = vsco_url
-        if "vs.co/" in target_url:
-            print("Shortlink detected. Resolving...")
-            try:
-                # Follow the redirect to get the actual vsco.co canonical URL
-                res = requests.head(target_url, allow_redirects=True, timeout=10)
-                target_url = res.url
-                print(f"Resolved to: {target_url}")
-            except Exception as e:
-                print(f"Failed to resolve shortlink: {e}")
+        
+        # The 'impersonate' argument handles all the complex TLS spoofing
+        # and header generation automatically!
+        res = requests.get(target_url, impersonate="chrome", timeout=15, allow_redirects=True)
+        
+        target_url = res.url.split('?')[0]
+        html = res.text
 
-        # 2. Setup gallery-dl config with DEBUG logging
-        gallery_dl.config.clear()
-        gallery_dl.config.set((), "log", {"level": "debug"})
+        # Fallback shortlink resolution
+        if "vs.co/" in target_url:
+            canonical_match = re.search(r'(https://vsco\.co/[^"\'\s>]+)', html)
+            if canonical_match:
+                target_url = canonical_match.group(1).split('?')[0]
+                # Re-fetch with impersonation
+                res = requests.get(target_url, impersonate="chrome", timeout=15)
+                html = res.text
+
+        if res.status_code == 403:
+            raise Exception("Cloudflare is still blocking the request. Your IP may be temporarily flagged.")
+
+        # --- The rest of your regex extraction logic stays exactly the same ---
+        download_url = ""
+        thumbnail_url = ""
+        ext = "jpg"
         
-        # 3. Capture BOTH stdout (JSON data) and stderr (Debug Logs)
-        f_out = io.StringIO()
-        f_err = io.StringIO()
-        
-        with contextlib.redirect_stdout(f_out), contextlib.redirect_stderr(f_err):
-            try:
-                j = gallery_dl.job.DataJob(target_url)
-                j.run()
-            except Exception as e:
-                # If gallery-dl throws a hard exception, catch it
-                raise Exception(f"Job failed: {str(e)}\nLogs: {f_err.getvalue()}")
+        video_match = re.search(r'property="og:video" content="([^"]+)"', html)
+        if video_match:
+            v_url = video_match.group(1).replace("&amp;", "&")
+            v_res = requests.get(v_url, impersonate="chrome", timeout=15)
+            v_html = v_res.text
             
-        output = f_out.getvalue().strip()
-        debug_logs = f_err.getvalue().strip()
-        
-        # 4. Better error surfacing
-        if not output:
-            print(f"--- GALLERY-DL DEBUG LOGS ---\n{debug_logs}\n-----------------------------")
-            raise Exception("gallery-dl returned no data. Check the debug logs printed in the console.")
-            
-        # Parse the JSON
-        lines = output.split('\n')
-        data = json.loads(lines[0])
-        
-        metadata = data[2] if len(data) > 2 else {}
-        
+            mux_match = re.search(r'(stream\.mux\.com[^"]+)', v_html)
+            if mux_match:
+                download_url = "https://" + mux_match.group(1).replace("\\u002F", "/")
+                ext = "mp4"
+            else:
+                mp4_match = re.search(r'(https://[^"]+\.mp4)', v_html)
+                if mp4_match:
+                    download_url = mp4_match.group(1)
+                    ext = "mp4"
+
+        if not download_url:
+            image_match = re.search(r'property="og:image" content="([^"]+)"', html)
+            if image_match:
+                download_url = image_match.group(1).split('?')[0]
+                ext = "jpg"
+
+        if ext == "mp4":
+            poster_match = re.search(r'property="og:image" content="([^"]+)"', html)
+            if poster_match:
+                thumbnail_url = poster_match.group(1)
+        else:
+            thumbnail_url = download_url
+
+        if not download_url:
+            raise Exception("Could not find media URLs in the page HTML.")
+
+        title_match = re.search(r'<title>(.*?)</title>', html)
+        title = "vsco_media"
+        if title_match:
+            raw_title = title_match.group(1)
+            parts = raw_title.split("|")
+            title = parts[-2].strip() if len(parts) >= 3 else (parts[0].strip() if parts else raw_title.strip())
+            title = re.sub(r'[^a-zA-Z0-9_\-]', '', title.replace(' ', '_'))
+            if not title:
+                title = "vsco_download"
+
         return {
-            "title": metadata.get("shortcode", metadata.get("id", "VSCO_Media")),
-            "ext": metadata.get("extension", "jpg"),
-            "thumbnail": metadata.get("url", "")
+            "title": title,
+            "ext": ext,
+            "thumbnail": thumbnail_url,
+            "download_url": download_url
         }
 
     return await asyncio.to_thread(extract)
 
 
-async def dl_video_async(vsco_url, out_path, filename, resolution, progress_hook):
+async def dl_vsco_async(download_url, out_path, filename, ext, progress_hook):
     """
-    Downloads the VSCO media via gallery-dl's DownloadJob.
+    Downloads the direct media URL. Uses 'requests' for lightning-fast image
+    downloads, and 'yt-dlp' for parsing .m3u8 video streams.
     """
-    print("starting dl_video_async")
+    print(f"starting dl_vsco_async for direct URL: {download_url}")
     
     def download():
-        # Reset config for a clean download state
-        gallery_dl.config.clear()
-        gallery_dl.config.set((), "log", {"level": "error"})
-        
-        # Set base destination folder based on your OS get_dest_path()
-        gallery_dl.config.set(("extractor",), "base-directory", out_path)
-        
-        # Prevent gallery-dl from creating default nested folders (e.g., /vsco/username/)
-        gallery_dl.config.set(("extractor",), "directory", [])
-        
-        # Differentiate between a single item and a gallery
-        is_gallery = 'gallery' in vsco_url or '/user/' in vsco_url
-        
-        if is_gallery:
-            # gallery-dl's equivalent of %(autonumber)s is {num}
-            gallery_dl.config.set(("extractor",), "filename", f"{filename}_{{num}}.{{extension}}")
+        # Ensure out_path exists
+        os.makedirs(out_path, exist_ok=True)
+        dest = os.path.join(out_path, f"{filename}.{ext}")
+
+        # --- IMAGE DOWNLOAD LOGIC ---
+        if ext in ["jpg", "jpeg", "png"]:
+            print("Downloading image via requests...")
+            
+            # Use stream=True to download in chunks for the progress bar
+            res = requests.get(download_url, stream=True, timeout=15)
+            res.raise_for_status()
+            
+            total_bytes = int(res.headers.get('content-length', 0))
+            downloaded_bytes = 0
+            
+            with open(dest, 'wb') as f:
+                # 8KB chunks
+                for chunk in res.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_bytes += len(chunk)
+                        
+                        # Feed the exact dictionary structure your UI expects
+                        if total_bytes:
+                            progress_hook({
+                                'status': 'downloading',
+                                'downloaded_bytes': downloaded_bytes,
+                                'total_bytes': total_bytes
+                            })
+                            
+            progress_hook({'status': 'finished'})
+
+        # --- VIDEO DOWNLOAD LOGIC ---
         else:
-            gallery_dl.config.set(("extractor",), "filename", f"{filename}.{{extension}}")
+            print("Downloading video stream manually...")
+            progress_hook({'status': 'downloading'})
+            
+            # 1. Download the m3u8 playlist
+            m3u8_res = requests.get(download_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            m3u8_res.raise_for_status()
+            
+            lines = m3u8_res.text.split('\n')
+            
+            # 2. Extract chunk URLs (often they are relative to the playlist URL)
+            base_url = download_url.rsplit('/', 1)[0] + '/'
+            ts_urls = []
+            
+            for line in lines:
+                if line and not line.startswith('#'):
+                    # If it's a relative URL, append it to the base
+                    if not line.startswith('http'):
+                        ts_urls.append(base_url + line)
+                    else:
+                        ts_urls.append(line)
+                        
+            # 3. Download and concatenate chunks into the final destination file
+            total_chunks = len(ts_urls)
+            with open(dest, 'wb') as outfile:
+                for i, ts_url in enumerate(ts_urls):
+                    # Download each tiny video chunk
+                    ts_res = requests.get(ts_url, timeout=15)
+                    ts_res.raise_for_status()
+                    # Append it directly to our final file
+                    outfile.write(ts_res.content)
+                    
+                    # Optional: Fake a percentage update for the UI based on chunks completed
+                    progress_hook({
+                        'status': 'downloading',
+                        'fragment_index': i + 1,
+                        'fragment_count': total_chunks
+                    })
 
-        # Trigger your UI's indeterminate progress state since gallery-dl
-        # doesn't natively pipe byte-level download updates to a Python hook
-        progress_hook({'status': 'downloading'})
-
-        # Execute the download
-        j = gallery_dl.job.DownloadJob(vsco_url)
-        j.run()
-
-        # Alert the UI it's done
-        progress_hook({'status': 'finished'})
+            progress_hook({'status': 'finished'})
 
     # Push the blocking download to a background thread
     await asyncio.to_thread(download)
@@ -234,10 +306,15 @@ class VsLoader(toga.App):
         # show init layout
         self.show_init_layout()
 
-    # button.style.margin = (5, 10, 15, 20)  ->  (top, right, bottom, left)
     def show_init_layout(self):
         print("show_init_layout")
         self.main_box = toga.Box(direction=COLUMN)
+
+        # --- NEW: Hidden WebView to bypass Cloudflare ---
+        self.hidden_webview = toga.WebView(style=Pack(width=1, height=1))
+        self.hidden_webview.style.visibility = 'hidden'
+        self.main_box.add(self.hidden_webview)
+        # ------------------------------------------------
 
         # hint
         hint_label = toga.Label(
@@ -505,33 +582,52 @@ class VsLoader(toga.App):
             self.show_loading_layout()
 
             try:
-                # load media info asynchronously
-                load_task = asyncio.create_task(
-                    extract_vsco_info(f"{self.url_input.value}", "2160"))
-                info = await load_task
+                target_url = self.url_input.value
+
+                # 1. Load URL natively in iOS WebKit to bypass Cloudflare
+                self.hidden_webview.url = target_url
+
+                # 2. Give the page a few seconds to negotiate TLS and load the DOM
+                await asyncio.sleep(4.0)
+
+                # 3. Extract HTML via JavaScript
+                html = await self.hidden_webview.evaluate_javascript("document.documentElement.innerHTML")
+                
+                # Check if Cloudflare challenged us
+                if html and ("just a moment" in html.lower() or "cloudflare" in html.lower()):
+                    print("Cloudflare challenge detected. Waiting 3 more seconds...")
+                    await asyncio.sleep(3.0)
+                    html = await self.hidden_webview.evaluate_javascript("document.documentElement.innerHTML")
+
+                if not html:
+                    raise Exception("WebView failed to load the HTML.")
+
+                # 4. Parse the DOM (Sync, because Regex is instant)
+                info = self.parse_vsco_html(html)
 
                 title = info["title"]
                 ext = info["ext"]
                 thumbnail_url = info["thumbnail"]
                 filename = sanitize_filename(title[0:23])
 
+                # SAVE THESE TO THE CLASS INSTANCE
+                self.current_download_url = info["download_url"]
+                self.current_ext = ext
+
                 await self.show_preview_layout(filename, thumbnail_url)
                 
             except Exception as e:
-                # 1. Log the previously swallowed exception!
                 print(f"Extraction Error: {e}")
                 
-                # 2. Reset the UI so it doesn't get stuck
                 self.url_input.enabled = True
                 self.paste_button.enabled = True
                 self.progress.stop()
                 self.progress.style.visibility = 'hidden'
                 
-                # 3. Alert the user
                 await self.main_window.dialog(
                     toga.InfoDialog(
                         "Extraction Failed",
-                        "Could not load preview"
+                        str(e)
                     )
                 )
         else:
@@ -541,6 +637,70 @@ class VsLoader(toga.App):
                     "Please paste a valid URL"
                 )
             )
+            
+    def parse_vsco_html(self, html):
+        """Regex parser mirroring the Android Kotlin logic."""
+        download_url = ""
+        thumbnail_url = ""
+        ext = "jpg"
+        
+        # --- VIDEO EXTRACTION ---
+        video_match = re.search(r'property="og:video" content="([^"]+)"', html)
+        if video_match:
+            v_url = video_match.group(1).replace("&amp;", "&")
+            
+            # Follow the video link to get the stream (uses standard requests)
+            v_res = requests.get(v_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            v_html = v_res.text
+            
+            mux_match = re.search(r'(stream\.mux\.com[^"]+)', v_html)
+            if mux_match:
+                download_url = "https://" + mux_match.group(1).replace("\\u002F", "/")
+                ext = "mp4"
+            else:
+                mp4_match = re.search(r'(https://[^"]+\.mp4)', v_html)
+                if mp4_match:
+                    download_url = mp4_match.group(1)
+                    ext = "mp4"
+                else:
+                    download_url = v_url
+                    ext = "mp4"
+
+        # --- IMAGE EXTRACTION ---
+        if not download_url:
+            image_match = re.search(r'property="og:image" content="([^"]+)"', html)
+            if image_match:
+                download_url = image_match.group(1).split('?')[0]
+                ext = "jpg"
+
+        # --- THUMBNAIL EXTRACTION ---
+        if ext == "mp4":
+            poster_match = re.search(r'property="og:image" content="([^"]+)"', html)
+            if poster_match:
+                thumbnail_url = poster_match.group(1)
+        else:
+            thumbnail_url = download_url
+
+        if not download_url:
+            raise Exception("Could not find media URLs in the page HTML.")
+
+        # --- TITLE GENERATION ---
+        title_match = re.search(r'<title>(.*?)</title>', html)
+        title = "vsco_media"
+        if title_match:
+            raw_title = title_match.group(1)
+            parts = raw_title.split("|")
+            title = parts[-2].strip() if len(parts) >= 3 else (parts[0].strip() if parts else raw_title.strip())
+            title = re.sub(r'[^a-zA-Z0-9_\-]', '', title.replace(' ', '_'))
+            if not title:
+                title = "vsco_download"
+
+        return {
+            "title": title,
+            "ext": ext,
+            "thumbnail": thumbnail_url,
+            "download_url": download_url
+        }
 
     async def download_input(self, widget):
         # hide keyboard
@@ -553,7 +713,7 @@ class VsLoader(toga.App):
         ph = await create_progress_hook(pb)
 
         dl_task = asyncio.create_task(
-            dl_video_async(f"{self.url_input.value}",
+            dl_vsco_async(f"{self.url_input.value}",
                            get_dest_path(),
                            f"{self.filename_input.value}",
                            "2160",
