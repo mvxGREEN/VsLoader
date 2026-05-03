@@ -6,7 +6,10 @@ import toga
 import asyncio
 import queue
 from asyncio import TaskGroup
-import yt_dlp
+import io
+import json
+import contextlib
+import gallery_dl
 import re
 import random
 import sys
@@ -85,12 +88,85 @@ def validate_url(value):
         raise ValueError("Please paste a valid URL")
 
 
-async def dl_vsco_async(vsco_url, out, filename, resolution, progress_hook):
-    # TODO download photo, video, profile or gallery
-
-
 async def extract_vsco_info(vsco_url, resolution):
-    # TODO load media info at URL
+    """
+    Extracts metadata from a VSCO URL using gallery-dl's DataJob.
+    """
+    print(f"starting extract_vsco_info for: {vsco_url}")
+    
+    def extract():
+        # Clear any previous config state to prevent overlap
+        gallery_dl.config.clear()
+        gallery_dl.config.set((), "log", {"level": "error"})
+        
+        # Using DataJob acts similarly to yt-dlp's extract_info
+        f = io.StringIO()
+        with contextlib.redirect_stdout(f):
+            # DataJob extracts the metadata without downloading the file
+            j = gallery_dl.job.DataJob(vsco_url)
+            j.run()
+            
+        output = f.getvalue().strip()
+        if not output:
+            raise Exception("gallery-dl failed to extract metadata.")
+            
+        # DataJob prints one JSON array per media item.
+        # We grab the first one for the UI preview.
+        lines = output.split('\n')
+        data = json.loads(lines[0])
+        
+        # gallery-dl JSON format: [category_int, string_url, metadata_dict]
+        metadata = data[2] if len(data) > 2 else {}
+        
+        return {
+            "title": metadata.get("shortcode", metadata.get("id", "VSCO_Media")),
+            "ext": metadata.get("extension", "jpg"),
+            "thumbnail": metadata.get("url", "")
+        }
+
+    # Push the blocking extraction to a background thread
+    return await asyncio.to_thread(extract)
+
+
+async def dl_video_async(vsco_url, out_path, filename, resolution, progress_hook):
+    """
+    Downloads the VSCO media via gallery-dl's DownloadJob.
+    """
+    print("starting dl_video_async")
+    
+    def download():
+        # Reset config for a clean download state
+        gallery_dl.config.clear()
+        gallery_dl.config.set((), "log", {"level": "error"})
+        
+        # Set base destination folder based on your OS get_dest_path()
+        gallery_dl.config.set(("extractor",), "base-directory", out_path)
+        
+        # Prevent gallery-dl from creating default nested folders (e.g., /vsco/username/)
+        gallery_dl.config.set(("extractor",), "directory", [])
+        
+        # Differentiate between a single item and a gallery
+        is_gallery = 'gallery' in vsco_url or '/user/' in vsco_url
+        
+        if is_gallery:
+            # gallery-dl's equivalent of %(autonumber)s is {num}
+            gallery_dl.config.set(("extractor",), "filename", f"{filename}_{{num}}.{{extension}}")
+        else:
+            gallery_dl.config.set(("extractor",), "filename", f"{filename}.{{extension}}")
+
+        # Trigger your UI's indeterminate progress state since gallery-dl
+        # doesn't natively pipe byte-level download updates to a Python hook
+        progress_hook({'status': 'downloading'})
+
+        # Execute the download
+        j = gallery_dl.job.DownloadJob(vsco_url)
+        j.run()
+
+        # Alert the UI it's done
+        progress_hook({'status': 'finished'})
+
+    # Push the blocking download to a background thread
+    await asyncio.to_thread(download)
 
 
 async def create_progress_hook(progress_bar):
@@ -161,7 +237,7 @@ class VsLoader(toga.App):
                                         style=Pack(height=45))
         # paste button
         self.paste_button = toga.Button(
-            icon=toga.Icon("resources/bolt_64"),
+            icon=toga.Icon("resources/bolt_512"),
             on_press=self.paste_and_load,
             margin=(0, 0, 0, 4),
             style=Pack(width=45) # Forces the button to remain comfortably wide

@@ -6,7 +6,10 @@ import toga
 import asyncio
 import queue
 from asyncio import TaskGroup
-import yt_dlp
+import io
+import json
+import contextlib
+import gallery_dl
 import re
 import random
 import sys
@@ -85,14 +88,104 @@ def validate_url(value):
         raise ValueError("Please paste a valid URL")
 
 
-async def dl_vsco_async(vsco_url, out, filename, resolution, progress_hook):
-    print("starting dl_vsco_async")
-    # TODO download photo, video, profile or gallery
-
-
 async def extract_vsco_info(vsco_url, resolution):
-    print("starting dl_vsco_async")
-    # TODO load media info at URL
+    """
+    Extracts metadata from a VSCO URL using gallery-dl's DataJob.
+    Includes shortlink resolution and debug logging.
+    """
+    print(f"starting extract_vsco_info for: {vsco_url}")
+    
+    def extract():
+        # 1. Resolve shortlinks (vs.co -> vsco.co)
+        target_url = vsco_url
+        if "vs.co/" in target_url:
+            print("Shortlink detected. Resolving...")
+            try:
+                # Follow the redirect to get the actual vsco.co canonical URL
+                res = requests.head(target_url, allow_redirects=True, timeout=10)
+                target_url = res.url
+                print(f"Resolved to: {target_url}")
+            except Exception as e:
+                print(f"Failed to resolve shortlink: {e}")
+
+        # 2. Setup gallery-dl config with DEBUG logging
+        gallery_dl.config.clear()
+        gallery_dl.config.set((), "log", {"level": "debug"})
+        
+        # 3. Capture BOTH stdout (JSON data) and stderr (Debug Logs)
+        f_out = io.StringIO()
+        f_err = io.StringIO()
+        
+        with contextlib.redirect_stdout(f_out), contextlib.redirect_stderr(f_err):
+            try:
+                j = gallery_dl.job.DataJob(target_url)
+                j.run()
+            except Exception as e:
+                # If gallery-dl throws a hard exception, catch it
+                raise Exception(f"Job failed: {str(e)}\nLogs: {f_err.getvalue()}")
+            
+        output = f_out.getvalue().strip()
+        debug_logs = f_err.getvalue().strip()
+        
+        # 4. Better error surfacing
+        if not output:
+            print(f"--- GALLERY-DL DEBUG LOGS ---\n{debug_logs}\n-----------------------------")
+            raise Exception("gallery-dl returned no data. Check the debug logs printed in the console.")
+            
+        # Parse the JSON
+        lines = output.split('\n')
+        data = json.loads(lines[0])
+        
+        metadata = data[2] if len(data) > 2 else {}
+        
+        return {
+            "title": metadata.get("shortcode", metadata.get("id", "VSCO_Media")),
+            "ext": metadata.get("extension", "jpg"),
+            "thumbnail": metadata.get("url", "")
+        }
+
+    return await asyncio.to_thread(extract)
+
+
+async def dl_video_async(vsco_url, out_path, filename, resolution, progress_hook):
+    """
+    Downloads the VSCO media via gallery-dl's DownloadJob.
+    """
+    print("starting dl_video_async")
+    
+    def download():
+        # Reset config for a clean download state
+        gallery_dl.config.clear()
+        gallery_dl.config.set((), "log", {"level": "error"})
+        
+        # Set base destination folder based on your OS get_dest_path()
+        gallery_dl.config.set(("extractor",), "base-directory", out_path)
+        
+        # Prevent gallery-dl from creating default nested folders (e.g., /vsco/username/)
+        gallery_dl.config.set(("extractor",), "directory", [])
+        
+        # Differentiate between a single item and a gallery
+        is_gallery = 'gallery' in vsco_url or '/user/' in vsco_url
+        
+        if is_gallery:
+            # gallery-dl's equivalent of %(autonumber)s is {num}
+            gallery_dl.config.set(("extractor",), "filename", f"{filename}_{{num}}.{{extension}}")
+        else:
+            gallery_dl.config.set(("extractor",), "filename", f"{filename}.{{extension}}")
+
+        # Trigger your UI's indeterminate progress state since gallery-dl
+        # doesn't natively pipe byte-level download updates to a Python hook
+        progress_hook({'status': 'downloading'})
+
+        # Execute the download
+        j = gallery_dl.job.DownloadJob(vsco_url)
+        j.run()
+
+        # Alert the UI it's done
+        progress_hook({'status': 'finished'})
+
+    # Push the blocking download to a background thread
+    await asyncio.to_thread(download)
 
 
 async def create_progress_hook(progress_bar):
@@ -163,7 +256,7 @@ class VsLoader(toga.App):
                                         style=Pack(height=45))
         # paste button
         self.paste_button = toga.Button(
-            icon=toga.Icon("resources/bolt_64"),
+            icon=toga.Icon("resources/bolt_512"),
             on_press=self.paste_and_load,
             margin=(0, 0, 0, 4),
             style=Pack(width=45) # Forces the button to remain comfortably wide
@@ -257,7 +350,7 @@ class VsLoader(toga.App):
         self.download_button.style.visibility = 'hidden'
 
         # main window
-        self.main_window = toga.MainWindow(title="VsLoader")
+        self.main_window = toga.MainWindow(title="MusiLoader")
         self.main_window.content = self.main_box
         self.main_window.show()
 
@@ -435,14 +528,14 @@ class VsLoader(toga.App):
                 self.progress.style.visibility = 'hidden'
                 
                 # 3. Alert the user
-                self.main_window.dialog(
+                await self.main_window.dialog(
                     toga.InfoDialog(
                         "Extraction Failed",
                         "Could not load preview"
                     )
                 )
         else:
-            self.main_window.dialog(
+            await self.main_window.dialog(
                 toga.InfoDialog(
                     "Error: Invalid URL",
                     "Please paste a valid URL"
