@@ -197,8 +197,19 @@ async def dl_vsco_async(download_url, out_path, filename, ext, progress_hook):
     
     def download():
         import sys
+        import os
         os.makedirs(out_path, exist_ok=True)
-        dest = os.path.join(out_path, f"{filename}.{ext}")
+        
+        # --- NEW: File Collision Prevention ---
+        base_name = filename
+        dest = os.path.join(out_path, f"{base_name}.{ext}")
+        counter = 1
+        
+        # Keep incrementing the counter until we find a filename that doesn't exist
+        while os.path.exists(dest):
+            dest = os.path.join(out_path, f"{base_name}_{counter}.{ext}")
+            counter += 1
+        # --------------------------------------
         
         def fetch_data(url_str):
             if sys.platform == 'ios':
@@ -234,7 +245,7 @@ async def dl_vsco_async(download_url, out_path, filename, ext, progress_hook):
 
         # --- DIRECT FILE DOWNLOAD (Images & Direct MP4s) ---
         if not is_playlist:
-            print("Downloading direct media file...")
+            print(f"Downloading direct media file to {dest}...")
             progress_hook({'status': 'downloading'})
             
             content = fetch_data(download_url)
@@ -245,7 +256,7 @@ async def dl_vsco_async(download_url, out_path, filename, ext, progress_hook):
 
         # --- VIDEO PLAYLIST DOWNLOAD (M3U8 Chunks) ---
         else:
-            print("Downloading video stream manually...")
+            print(f"Downloading video stream manually to {dest}...")
             progress_hook({'status': 'downloading'})
             
             m3u8_content = fetch_data(download_url).decode('utf-8')
@@ -339,7 +350,8 @@ class VsLoader(toga.App):
         hint_label = toga.Label(
             "Paste URL:",
             font_family="Gotu",
-            margin=(8, 8, 4, 8),
+            font_size=12,
+            margin=(8,8,8,16),
         )
         self.hint_box = toga.Box(children=[hint_label])
 
@@ -351,7 +363,7 @@ class VsLoader(toga.App):
                                         validators=[validate_url],
                                         style=Pack(
                                             height=45,
-                                            font_family="Gotu"))
+                                            margin_left=8))
         # paste button
         self.paste_button = toga.Button(
             icon=toga.Icon("resources/bolt_512"),
@@ -633,7 +645,7 @@ class VsLoader(toga.App):
                 self.main_webview.url = target_url
 
                 # 2. Give the page a few seconds to negotiate TLS and load the DOM
-                await asyncio.sleep(3.3)
+                await asyncio.sleep(1.3)
 
                 # 3. Extract HTML via JavaScript
                 html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
@@ -755,8 +767,8 @@ class VsLoader(toga.App):
         # hide keyboard
         self.app.main_window.content = self.app.main_window.content
 
-        # update ui (fallback to show_loading_layout since show_downloading_layout is missing)
-        self.show_loading_layout()
+        # update ui state
+        await self.show_downloading_layout()
 
         pb = self.progress
         ph = await create_progress_hook(pb)
@@ -781,15 +793,18 @@ class VsLoader(toga.App):
             self.download_button.text = "Finished!"
             self.url_input.enabled = True
             self.paste_button.enabled = True
+            self.filename_input.enabled = True
             print("finished showing finished layout!")
             
         except Exception as e:
             print(f"Download failed: {e}")
             self.download_button.text = "Error"
+            self.download_button.enabled = True # re-enable so they can try again
             self.progress.stop()
             self.progress.style.visibility = 'hidden'
             self.url_input.enabled = True
             self.paste_button.enabled = True
+            self.filename_input.enabled = True
             await self.main_window.dialog(
                 toga.InfoDialog("Download Failed", str(e))
             )
