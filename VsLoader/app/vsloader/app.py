@@ -95,15 +95,26 @@ async def extract_vsco_info(vsco_url, resolution):
     """
     print(f"Starting HTML extraction for: {vsco_url}")
     
+    # delay
+    await asyncio.sleep(0.043)
+    
     def extract():
         target_url = vsco_url
         
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        
         # The 'impersonate' argument handles all the complex TLS spoofing
         # and header generation automatically!
-        res = requests.get(target_url, impersonate="chrome", timeout=15, allow_redirects=True)
+        res = requests.get(target_url, headers=headers, timeout=15, allow_redirects=True)
         
         target_url = res.url.split('?')[0]
         html = res.text
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
 
         # Fallback shortlink resolution
         if "vs.co/" in target_url:
@@ -111,7 +122,7 @@ async def extract_vsco_info(vsco_url, resolution):
             if canonical_match:
                 target_url = canonical_match.group(1).split('?')[0]
                 # Re-fetch with impersonation
-                res = requests.get(target_url, impersonate="chrome", timeout=15)
+                res = requests.get(target_url, headers=headers, timeout=15)
                 html = res.text
 
         if res.status_code == 403:
@@ -122,10 +133,14 @@ async def extract_vsco_info(vsco_url, resolution):
         thumbnail_url = ""
         ext = "jpg"
         
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        
         video_match = re.search(r'property="og:video" content="([^"]+)"', html)
         if video_match:
             v_url = video_match.group(1).replace("&amp;", "&")
-            v_res = requests.get(v_url, impersonate="chrome", timeout=15)
+            v_res = requests.get(v_url, headers=headers, timeout=15)
             v_html = v_res.text
             
             mux_match = re.search(r'(stream\.mux\.com[^"]+)', v_html)
@@ -175,50 +190,66 @@ async def extract_vsco_info(vsco_url, resolution):
 
 
 async def dl_vsco_async(download_url, out_path, filename, ext, progress_hook):
-    """Downloads the direct media URL."""
+    """Downloads the direct media URL natively on iOS."""
     print(f"starting dl_vsco_async for direct URL: {download_url}")
     
+    await asyncio.sleep(0.043)
+    
     def download():
+        import sys
         os.makedirs(out_path, exist_ok=True)
         dest = os.path.join(out_path, f"{filename}.{ext}")
         
-        # set user agent
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        def fetch_data(url_str):
+            if sys.platform == 'ios':
+                import ctypes
+                from rubicon.objc import ObjCClass
+                NSURL = ObjCClass('NSURL')
+                NSMutableURLRequest = ObjCClass('NSMutableURLRequest')
+                NSURLConnection = ObjCClass('NSURLConnection')
+                
+                url_obj = NSURL.URLWithString_(str(url_str))
+                req = NSMutableURLRequest.requestWithURL_(url_obj)
+                req.setValue_forHTTPHeaderField_(
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+                    "User-Agent"
+                )
+                
+                data = NSURLConnection.sendSynchronousRequest_returningResponse_error_(req, None, None)
+                if data is None:
+                    raise Exception(f"Native iOS download blocked or failed: {url_str}")
+                
+                # Extract Python bytes from NSData
+                return ctypes.string_at(data.bytes, data.length)
+            else:
+                import urllib.request
+                req = urllib.request.Request(
+                    url_str,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                )
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    return response.read()
 
-        # --- IMAGE DOWNLOAD LOGIC ---
-        if ext in ["jpg", "jpeg", "png"]:
-            print("Downloading image via requests...")
-            res = requests.get(download_url, stream=True, timeout=15, headers=headers)
-            res.raise_for_status()
+        is_playlist = "stream.mux.com" in download_url or download_url.endswith(".m3u8")
+
+        # --- DIRECT FILE DOWNLOAD (Images & Direct MP4s) ---
+        if not is_playlist:
+            print("Downloading direct media file...")
+            progress_hook({'status': 'downloading'})
             
-            total_bytes = int(res.headers.get('content-length', 0))
-            downloaded_bytes = 0
-            
+            content = fetch_data(download_url)
             with open(dest, 'wb') as f:
-                for chunk in res.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded_bytes += len(chunk)
-                        if total_bytes:
-                            progress_hook({
-                                'status': 'downloading',
-                                'downloaded_bytes': downloaded_bytes,
-                                'total_bytes': total_bytes
-                            })
+                f.write(content)
                             
             progress_hook({'status': 'finished'})
 
-        # --- VIDEO DOWNLOAD LOGIC ---
+        # --- VIDEO PLAYLIST DOWNLOAD (M3U8 Chunks) ---
         else:
             print("Downloading video stream manually...")
             progress_hook({'status': 'downloading'})
             
-            m3u8_res = requests.get(download_url, headers=headers, timeout=15)
-            m3u8_res.raise_for_status()
-            
-            lines = m3u8_res.text.split('\n')
+            m3u8_content = fetch_data(download_url).decode('utf-8')
+            lines = m3u8_content.split('\n')
             base_url = download_url.rsplit('/', 1)[0] + '/'
             ts_urls = []
             
@@ -232,9 +263,8 @@ async def dl_vsco_async(download_url, out_path, filename, ext, progress_hook):
             total_chunks = len(ts_urls)
             with open(dest, 'wb') as outfile:
                 for i, ts_url in enumerate(ts_urls):
-                    ts_res = requests.get(ts_url, headers=headers, timeout=15)
-                    ts_res.raise_for_status()
-                    outfile.write(ts_res.content)
+                    chunk_data = fetch_data(ts_url)
+                    outfile.write(chunk_data)
                     progress_hook({
                         'status': 'downloading',
                         'fragment_index': i + 1,
@@ -288,6 +318,7 @@ class VsLoader(toga.App):
         toga.Font.register("FiraSans", "resources/FiraSans-Regular.ttf")
         toga.Font.register("FiraSansExtraLight", "resources/FiraSans-ExtraLight.ttf")
         toga.Font.register("FiraSansBold", "resources/FiraSans-Bold.ttf")
+        toga.Font.register("Gotu", "resources/Gotu-Regular.ttf")
 
         # show init layout
         self.show_init_layout()
@@ -296,16 +327,18 @@ class VsLoader(toga.App):
         print("show_init_layout")
         self.main_box = toga.Box(direction=COLUMN)
 
-        # --- NEW: Hidden WebView to bypass Cloudflare ---
-        self.hidden_webview = toga.WebView(style=Pack(width=1, height=1))
-        self.hidden_webview.style.visibility = 'hidden'
-        self.main_box.add(self.hidden_webview)
-        # ------------------------------------------------
+        # init webview
+        self.main_webview = toga.WebView(
+            url="https://www.google.com",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            style=Pack(width=1, height=1))
+        self.main_webview.style.visibility = 'hidden'
+        self.main_box.add(self.main_webview)
 
         # hint
         hint_label = toga.Label(
             "Paste URL:",
-            font_family="FiraSans",
+            font_family="Gotu",
             margin=(8, 8, 4, 8),
         )
         self.hint_box = toga.Box(children=[hint_label])
@@ -316,7 +349,9 @@ class VsLoader(toga.App):
                                         on_change=self.input_change,
                                         flex=1,
                                         validators=[validate_url],
-                                        style=Pack(height=45))
+                                        style=Pack(
+                                            height=45,
+                                            font_family="Gotu"))
         # paste button
         self.paste_button = toga.Button(
             icon=toga.Icon("resources/bolt_512"),
@@ -382,10 +417,16 @@ class VsLoader(toga.App):
         # filename box
         self.filename_input_label = toga.Label(
             "Filename:",
-            font_family="FiraSans",
+            font_family="Gotu",
             margin=(12, 4, 8, 12)
         )
-        self.filename_input = toga.TextInput(margin=(8, 12, 8, 4), direction=ROW, flex=1)
+        self.filename_input = toga.TextInput(
+            margin=(8, 12, 8, 4),
+            direction=ROW,
+            flex=1,
+            style=Pack(
+                font_family="Gotu"
+            ))
         filename_box = toga.Box(direction=ROW)
         filename_box.add(self.filename_input_label)
         filename_box.add(self.filename_input)
@@ -452,18 +493,47 @@ class VsLoader(toga.App):
         try:
             print(f"loading thumbnail_url: {thumbnail_url}")
 
-            # set user agent
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
+            def fetch_thumbnail():
+                import sys
+                
+                if sys.platform == 'ios':
+                    import ctypes
+                    from rubicon.objc import ObjCClass
+                    NSURL = ObjCClass('NSURL')
+                    NSMutableURLRequest = ObjCClass('NSMutableURLRequest')
+                    NSURLConnection = ObjCClass('NSURLConnection')
+                    
+                    url_obj = NSURL.URLWithString_(str(thumbnail_url))
+                    req = NSMutableURLRequest.requestWithURL_(url_obj)
+                    
+                    req.setValue_forHTTPHeaderField_(
+                        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+                        "User-Agent"
+                    )
+                    
+                    data = NSURLConnection.sendSynchronousRequest_returningResponse_error_(req, None, None)
+                    
+                    if data is None:
+                        raise Exception("Native iOS download blocked or failed for thumbnail.")
+                    
+                    # Safely read the raw bytes from the Objective-C NSData pointer
+                    return ctypes.string_at(data.bytes, data.length)
+                
+                else:
+                    import urllib.request
+                    req = urllib.request.Request(
+                        thumbnail_url,
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                    )
+                    with urllib.request.urlopen(req, timeout=15) as response:
+                        return response.read()
 
-            response = await asyncio.to_thread(requests.get, thumbnail_url, headers=headers)
-            response.raise_for_status()
-
-            image_bytes = BytesIO(response.content)
+            image_bytes_data = await asyncio.to_thread(fetch_thumbnail)
+            image_bytes = BytesIO(image_bytes_data)
             toga_image = toga.Image(src=image_bytes.read())
             self.image_view.image = toga_image
-        except requests.exceptions.RequestException as e:
+            
+        except Exception as e:
             print(f"Error loading image: {e}")
         finally:
             self.url_input.enabled = True
@@ -560,32 +630,39 @@ class VsLoader(toga.App):
                 target_url = self.url_input.value
 
                 # 1. Load URL natively in iOS WebKit to bypass Cloudflare
-                self.hidden_webview.url = target_url
+                self.main_webview.url = target_url
 
                 # 2. Give the page a few seconds to negotiate TLS and load the DOM
-                await asyncio.sleep(4.0)
+                await asyncio.sleep(3.3)
 
                 # 3. Extract HTML via JavaScript
-                html = await self.hidden_webview.evaluate_javascript("document.documentElement.innerHTML")
+                html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
+                html_len = len(html)
+                    
+                print(f"HTML length: {html_len}")
                 
                 # Check if Cloudflare challenged us
                 if html and ("just a moment" in html.lower() or "cloudflare" in html.lower()):
                     print("Cloudflare challenge detected. Waiting 3 more seconds...")
-                    await asyncio.sleep(3.0)
-                    html = await self.hidden_webview.evaluate_javascript("document.documentElement.innerHTML")
+                    await asyncio.sleep(3.2)
+                    html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
 
                 if not html:
-                    raise Exception("WebView failed to load the HTML.")
+                    raise Exception("WebView failed to load the HTML")
+                html_len = len(html)
+
+                print(f"JS - HTML length: {html_len}")
 
                 # 4. Parse the DOM (Sync, because Regex is instant)
                 info = self.parse_vsco_html(html)
-
                 title = info["title"]
                 ext = info["ext"]
                 thumbnail_url = info["thumbnail"]
                 filename = sanitize_filename(title[0:23])
+                print(f"title={title}, ext={ext}," +
+                    f" thumbnail_url={thumbnail_url}, filename={filename}")
 
-                # SAVE THESE TO THE CLASS INSTANCE
+                # SAVE INFO TO THE CLASS INSTANCE
                 self.current_download_url = info["download_url"]
                 self.current_ext = ext
 
