@@ -350,8 +350,8 @@ class VsLoader(toga.App):
         hint_label = toga.Label(
             "Paste URL:",
             font_family="Gotu",
-            font_size=12,
-            margin=(8,8,8,16),
+            font_size=13,
+            margin=(8,8,8,17),
         )
         self.hint_box = toga.Box(children=[hint_label])
 
