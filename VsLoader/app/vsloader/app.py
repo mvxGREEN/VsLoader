@@ -175,36 +175,32 @@ async def extract_vsco_info(vsco_url, resolution):
 
 
 async def dl_vsco_async(download_url, out_path, filename, ext, progress_hook):
-    """
-    Downloads the direct media URL. Uses 'requests' for lightning-fast image
-    downloads, and 'yt-dlp' for parsing .m3u8 video streams.
-    """
+    """Downloads the direct media URL."""
     print(f"starting dl_vsco_async for direct URL: {download_url}")
     
     def download():
-        # Ensure out_path exists
         os.makedirs(out_path, exist_ok=True)
         dest = os.path.join(out_path, f"{filename}.{ext}")
+        
+        # set user agent
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
 
         # --- IMAGE DOWNLOAD LOGIC ---
         if ext in ["jpg", "jpeg", "png"]:
             print("Downloading image via requests...")
-            
-            # Use stream=True to download in chunks for the progress bar
-            res = requests.get(download_url, stream=True, timeout=15)
+            res = requests.get(download_url, stream=True, timeout=15, headers=headers)
             res.raise_for_status()
             
             total_bytes = int(res.headers.get('content-length', 0))
             downloaded_bytes = 0
             
             with open(dest, 'wb') as f:
-                # 8KB chunks
                 for chunk in res.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
                         downloaded_bytes += len(chunk)
-                        
-                        # Feed the exact dictionary structure your UI expects
                         if total_bytes:
                             progress_hook({
                                 'status': 'downloading',
@@ -219,35 +215,26 @@ async def dl_vsco_async(download_url, out_path, filename, ext, progress_hook):
             print("Downloading video stream manually...")
             progress_hook({'status': 'downloading'})
             
-            # 1. Download the m3u8 playlist
-            m3u8_res = requests.get(download_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            m3u8_res = requests.get(download_url, headers=headers, timeout=15)
             m3u8_res.raise_for_status()
             
             lines = m3u8_res.text.split('\n')
-            
-            # 2. Extract chunk URLs (often they are relative to the playlist URL)
             base_url = download_url.rsplit('/', 1)[0] + '/'
             ts_urls = []
             
             for line in lines:
                 if line and not line.startswith('#'):
-                    # If it's a relative URL, append it to the base
                     if not line.startswith('http'):
                         ts_urls.append(base_url + line)
                     else:
                         ts_urls.append(line)
                         
-            # 3. Download and concatenate chunks into the final destination file
             total_chunks = len(ts_urls)
             with open(dest, 'wb') as outfile:
                 for i, ts_url in enumerate(ts_urls):
-                    # Download each tiny video chunk
-                    ts_res = requests.get(ts_url, timeout=15)
+                    ts_res = requests.get(ts_url, headers=headers, timeout=15)
                     ts_res.raise_for_status()
-                    # Append it directly to our final file
                     outfile.write(ts_res.content)
-                    
-                    # Optional: Fake a percentage update for the UI based on chunks completed
                     progress_hook({
                         'status': 'downloading',
                         'fragment_index': i + 1,
@@ -256,7 +243,6 @@ async def dl_vsco_async(download_url, out_path, filename, ext, progress_hook):
 
             progress_hook({'status': 'finished'})
 
-    # Push the blocking download to a background thread
     await asyncio.to_thread(download)
 
 
@@ -459,7 +445,6 @@ class VsLoader(toga.App):
     async def show_preview_layout(self, filename, thumbnail_url):
         print("show_preview_layout")
 
-        # convert webp thumbnail urls to jpg
         if thumbnail_url.endswith(".webp"):
             thumbnail_url = thumbnail_url.replace("vi_webp", "vi")
             thumbnail_url = thumbnail_url.replace(".webp", ".jpg")
@@ -467,40 +452,30 @@ class VsLoader(toga.App):
         try:
             print(f"loading thumbnail_url: {thumbnail_url}")
 
-            # Push the blocking network request to a background thread
-            response = await asyncio.to_thread(requests.get, thumbnail_url)
-            response.raise_for_status()  # Raise an exception for bad status codes
+            # set user agent
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+
+            response = await asyncio.to_thread(requests.get, thumbnail_url, headers=headers)
+            response.raise_for_status()
+
             image_bytes = BytesIO(response.content)
             toga_image = toga.Image(src=image_bytes.read())
             self.image_view.image = toga_image
         except requests.exceptions.RequestException as e:
-            # Handle potential errors during image download
             print(f"Error loading image: {e}")
-            # error_label = toga.Label(f"Error loading image: {e}")
-            # self.main_window.content = toga.Box(children=[error_label])
         finally:
-            # enable url textinput
             self.url_input.enabled = True
-
-            # enable paste button
             self.paste_button.enabled = True
-
-            # enable textinputs
             self.filename_input.enabled = True
-            self.url_input.enabled = True
-
-            # set current filename
             self.filename_input.value = filename
-
-            # show preview widgets
             self.image_view.style.visibility = 'visible'
             self.filename_input_label.style.visibility = 'visible'
             self.filename_input.style.visibility = 'visible'
             self.download_button.style.visibility = 'visible'
-
-            # stop indeterminate progress
             self.progress.stop()
-
+            
     async def show_downloading_layout(self):
         print("show_downloading_layout")
 
@@ -639,52 +614,45 @@ class VsLoader(toga.App):
             )
             
     def parse_vsco_html(self, html):
-        """Regex parser mirroring the Android Kotlin logic."""
         download_url = ""
         thumbnail_url = ""
         ext = "jpg"
         
-        # --- VIDEO EXTRACTION ---
-        video_match = re.search(r'property="og:video" content="([^"]+)"', html)
-        if video_match:
-            v_url = video_match.group(1).replace("&amp;", "&")
-            
-            # Follow the video link to get the stream (uses standard requests)
-            v_res = requests.get(v_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-            v_html = v_res.text
-            
-            mux_match = re.search(r'(stream\.mux\.com[^"]+)', v_html)
-            if mux_match:
-                download_url = "https://" + mux_match.group(1).replace("\\u002F", "/")
+        # 1. MP4 (Direct img.vsco.co search)
+        if "https://img.vsco.co/" in html:
+            match = re.search(r'(https://img\.vsco\.co/[^"]+)', html)
+            if match:
+                download_url = match.group(1)
                 ext = "mp4"
-            else:
-                mp4_match = re.search(r'(https://[^"]+\.mp4)', v_html)
-                if mp4_match:
-                    download_url = mp4_match.group(1)
-                    ext = "mp4"
-                else:
-                    download_url = v_url
-                    ext = "mp4"
 
-        # --- IMAGE EXTRACTION ---
+        # 2. Mux Video Stream search
+        elif "stream.mux.com" in html:
+            match = re.search(r'(stream\.mux\.com[^"]+)', html)
+            if match:
+                download_url = "https://" + match.group(1).replace("\\u002F", "/")
+                ext = "mp4"
+        
+        # 3. Standard Image search
+        elif "im.vsco.co/" in html:
+            match = re.search(r'(https://im\.vsco\.co/[^"]+)', html)
+            if match:
+                download_url = match.group(1).split('?')[0]
+        
+        # 4. Fallback to OpenGraph image
         if not download_url:
-            image_match = re.search(r'property="og:image" content="([^"]+)"', html)
-            if image_match:
-                download_url = image_match.group(1).split('?')[0]
-                ext = "jpg"
-
-        # --- THUMBNAIL EXTRACTION ---
+            match = re.search(r'property="og:image" content="([^"]+)"', html)
+            if match:
+                download_url = match.group(1).split('?')[0]
+                
+        # 5. Extract Thumbnail
         if ext == "mp4":
             poster_match = re.search(r'property="og:image" content="([^"]+)"', html)
             if poster_match:
-                thumbnail_url = poster_match.group(1)
+                thumbnail_url = poster_match.group(1).split('?')[0]
         else:
             thumbnail_url = download_url
 
-        if not download_url:
-            raise Exception("Could not find media URLs in the page HTML.")
-
-        # --- TITLE GENERATION ---
+        # 6. Title Generation
         title_match = re.search(r'<title>(.*?)</title>', html)
         title = "vsco_media"
         if title_match:
@@ -692,8 +660,12 @@ class VsLoader(toga.App):
             parts = raw_title.split("|")
             title = parts[-2].strip() if len(parts) >= 3 else (parts[0].strip() if parts else raw_title.strip())
             title = re.sub(r'[^a-zA-Z0-9_\-]', '', title.replace(' ', '_'))
-            if not title:
-                title = "vsco_download"
+        
+        if not title:
+            title = "vsco_download"
+
+        if not download_url:
+            raise Exception("Could not find media URLs in the page HTML.")
 
         return {
             "title": title,
@@ -706,31 +678,44 @@ class VsLoader(toga.App):
         # hide keyboard
         self.app.main_window.content = self.app.main_window.content
 
-        # update ui
-        await self.show_downloading_layout()
+        # update ui (fallback to show_loading_layout since show_downloading_layout is missing)
+        self.show_loading_layout()
 
         pb = self.progress
         ph = await create_progress_hook(pb)
 
         dl_task = asyncio.create_task(
-            dl_vsco_async(f"{self.url_input.value}",
+            dl_vsco_async(self.current_download_url,
                            get_dest_path(),
                            f"{self.filename_input.value}",
-                           "2160",
+                           self.current_ext,
                            ph))
-        await dl_task
-        print(f"finished download!")
+        
+        try:
+            await dl_task
+            print("finished download!")
+            
+            # stop progress bar
+            self.progress.stop()
+            self.progress.max = 100
+            self.progress.value = 100
 
-        # stop progress bar
-        self.progress.stop()
-        self.progress.max = 100
-        self.progress.value = 100
-
-        # show finished layout
-        self.download_button.text = "Finished!"
-        self.url_input.enabled = True
-        self.paste_button.enabled = True
-        print("finished showing finished layout!")
+            # show finished layout
+            self.download_button.text = "Finished!"
+            self.url_input.enabled = True
+            self.paste_button.enabled = True
+            print("finished showing finished layout!")
+            
+        except Exception as e:
+            print(f"Download failed: {e}")
+            self.download_button.text = "Error"
+            self.progress.stop()
+            self.progress.style.visibility = 'hidden'
+            self.url_input.enabled = True
+            self.paste_button.enabled = True
+            await self.main_window.dialog(
+                toga.InfoDialog("Download Failed", str(e))
+            )
 
 
 def main():
