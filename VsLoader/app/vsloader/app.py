@@ -77,15 +77,15 @@ def sanitize_filename(filename):
 
 
 def validate_url(value):
-    """Custom Toga validator to check for valid HTTP/HTTPS URLs."""
+    """Custom Toga validator to check for valid VSCO URLs."""
     if not value:
-        return  # Allow empty (matches your current allow_empty=True behavior)
+        return  # Allow empty
     
-    # Standard regex for robust URL validation
-    url_pattern = re.compile(r"^https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)$")
+    # Strict regex for VSCO domains only (vsco.co and vs.co)
+    url_pattern = re.compile(r"^(?:https?://)?(?:www\.)?(?:vsco\.co|vs\.co)(?:/.*)?$", re.IGNORECASE)
     
     if not url_pattern.match(value):
-        raise ValueError("Please paste a valid URL")
+        raise ValueError("Please paste a valid VSCO link (vsco.co or vs.co)")
 
 
 async def extract_vsco_info(vsco_url, resolution):
@@ -241,7 +241,7 @@ async def dl_vsco_async(download_url, out_path, filename, ext, progress_hook):
                 with urllib.request.urlopen(req, timeout=15) as response:
                     return response.read()
 
-        is_playlist = "stream.mux.com" in download_url or download_url.endswith(".m3u8")
+        is_playlist = download_url.endswith(".m3u8")
 
         # --- DIRECT FILE DOWNLOAD (Images & Direct MP4s) ---
         if not is_playlist:
@@ -583,10 +583,10 @@ class VsLoader(toga.App):
             self.filename_input.style.visibility = 'hidden'
             self.download_button.style.visibility = 'hidden'
         else:
-            # Regex pattern to ensure the string is actually a safe, valid URL
-            url_pattern = re.compile(r"^https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)$")
+            # VSCO specific regex
+            url_pattern = re.compile(r"^(?:https?://)?(?:www\.)?(?:vsco\.co|vs\.co)(?:/.*)?$", re.IGNORECASE)
             
-            # Auto-trigger if the typed/pasted text is fully valid
+            # Auto-trigger if the typed/pasted text is a valid VSCO link
             if url_pattern.match(self.url_input.value):
                 asyncio.create_task(self.load_input(widget))
             
@@ -613,14 +613,33 @@ class VsLoader(toga.App):
                 return ""
 
     async def paste_and_load(self, widget):
-        """Action for the bolt button."""
+        """Action for the lightning button."""
         clip_text = self.get_clipboard_text()
         
         if clip_text:
-            # Updating the value automatically fires the input_change event!
-            self.url_input.value = clip_text
+            # 1. Inject the text into the input box.
+            # If the text is invalid, Toga's validator will immediately raise a ValueError.
+            # We MUST catch this error so the function doesn't crash!
+            try:
+                self.url_input.value = clip_text
+            except ValueError:
+                pass  # Ignore the crash so we can show our dialog below!
+            
+            # 2. Check if the pasted text is valid
+            url_pattern = re.compile(r"^(?:https?://)?(?:www\.)?(?:vsco\.co|vs\.co)(?:/.*)?$", re.IGNORECASE)
+            
+            if not url_pattern.match(clip_text):
+                # If it's invalid, alert the user with a dialog
+                await self.main_window.dialog(
+                    toga.InfoDialog(
+                        "Invalid Link",
+                        "The copied text is not a valid VSCO link (vsco.co or vs.co)."
+                    )
+                )
+            # (If it IS valid, the input_change listener has already detected it and started loading!)
+                
         else:
-            # Alert the user if there is nothing to paste
+            # Alert the user if the clipboard is completely empty
             await self.main_window.dialog(
                 toga.InfoDialog(
                     "Clipboard Empty",
@@ -636,8 +655,8 @@ class VsLoader(toga.App):
         # hide keyboard
         self.app.main_window.content = self.app.main_window.content
 
-        # URL validation regex pattern
-        url_pattern = re.compile(r"^https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)$")
+        # VSCO specific regex
+        url_pattern = re.compile(r"^(?:https?://)?(?:www\.)?(?:vsco\.co|vs\.co)(?:/.*)?$", re.IGNORECASE)
 
         # validate input with regex
         if self.url_input.value and url_pattern.match(self.url_input.value):
@@ -646,39 +665,35 @@ class VsLoader(toga.App):
 
             try:
                 target_url = self.url_input.value
+                
+                # Safety check: WebView requires a scheme
+                if not target_url.startswith("http"):
+                    target_url = "https://" + target_url
 
-                # 1. Load URL natively in iOS WebKit to bypass Cloudflare
+                # 1. Load URL natively in iOS WebKit
                 self.main_webview.url = target_url
 
-                # 2. Give the page a few seconds to negotiate TLS and load the DOM
-                await asyncio.sleep(1.3)
+                # 2. REVERT: Give the page a hard 4 seconds to load the React DOM
+                await asyncio.sleep(4.0)
 
                 # 3. Extract HTML via JavaScript
                 html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
-                html_len = len(html)
-                    
-                print(f"HTML length: {html_len}")
                 
                 # Check if Cloudflare challenged us
                 if html and ("just a moment" in html.lower() or "cloudflare" in html.lower()):
                     print("Cloudflare challenge detected. Waiting 3 more seconds...")
-                    await asyncio.sleep(3.2)
+                    await asyncio.sleep(3.0)
                     html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
 
                 if not html:
-                    raise Exception("WebView failed to load the HTML")
-                html_len = len(html)
+                    raise Exception("WebView failed to load the HTML.")
 
-                print(f"JS - HTML length: {html_len}")
-
-                # 4. Parse the DOM (Sync, because Regex is instant)
+                # 4. Parse the DOM
                 info = self.parse_vsco_html(html)
                 title = info["title"]
                 ext = info["ext"]
                 thumbnail_url = info["thumbnail"]
                 filename = sanitize_filename(title[0:23])
-                print(f"title={title}, ext={ext}," +
-                    f" thumbnail_url={thumbnail_url}, filename={filename}")
 
                 # SAVE INFO TO THE CLASS INSTANCE
                 self.current_download_url = info["download_url"]
@@ -688,24 +703,17 @@ class VsLoader(toga.App):
                 
             except Exception as e:
                 print(f"Extraction Error: {e}")
-                
                 self.url_input.enabled = True
                 self.paste_button.enabled = True
                 self.progress.stop()
                 self.progress.style.visibility = 'hidden'
                 
                 await self.main_window.dialog(
-                    toga.InfoDialog(
-                        "Extraction Failed",
-                        str(e)
-                    )
+                    toga.InfoDialog("Extraction Failed", str(e))
                 )
         else:
             await self.main_window.dialog(
-                toga.InfoDialog(
-                    "Error: Invalid URL",
-                    "Please paste a valid URL"
-                )
+                toga.InfoDialog("Error: Invalid URL", "Please paste a valid VSCO link.")
             )
             
     def parse_vsco_html(self, html):
@@ -738,13 +746,32 @@ class VsLoader(toga.App):
             match = re.search(r'property="og:image" content="([^"]+)"', html)
             if match:
                 download_url = match.group(1).split('?')[0]
+
+        # 5. Extract Thumbnail (Aligned 1-to-1 with Kotlin's extractThumbnail)
+        if "https://image.mux.com/" in html:
+            start = html.find("https://image.mux.com/")
+            if start != -1:
+                # Substring from the URL start, stopping at the first quote or space
+                tu = html[start:].split('"')[0].split("'")[0].split(' ')[0]
+                tu = tu.replace('\\', '') # Clean any JSON escaping
+                thumbnail_url = tu.split('?')[0]
                 
-        # 5. Extract Thumbnail
-        if ext == "mp4":
-            poster_match = re.search(r'property="og:image" content="([^"]+)"', html)
-            if poster_match:
-                thumbnail_url = poster_match.group(1).split('?')[0]
-        else:
+        elif "https://vsco.co/api/1.0/videos/mux/" in html:
+            start = html.find("https://vsco.co/api/1.0/videos/mux/")
+            if start != -1:
+                tu = html[start:].split('"')[0].split("'")[0].split(' ')[0]
+                tu = tu.replace('\\', '')
+                thumbnail_url = tu.split('?')[0] + "?w=1200"
+                
+        elif "https://im.vsco.co/" in html:
+            # Kotlin uses lastIndexOf for standard images, we use rfind()
+            start = html.rfind("https://im.vsco.co/")
+            if start != -1:
+                tu = html[start:].split('"')[0].split("'")[0].split(' ')[0]
+                tu = tu.replace('\\', '')
+                thumbnail_url = tu.split('?')[0]
+                
+        if not thumbnail_url:
             thumbnail_url = download_url
 
         # 6. Title Generation
@@ -768,7 +795,8 @@ class VsLoader(toga.App):
             "thumbnail": thumbnail_url,
             "download_url": download_url
         }
-
+        
+        
     async def download_input(self, widget):
         # hide keyboard
         self.app.main_window.content = self.app.main_window.content
