@@ -351,7 +351,7 @@ class VsLoader(toga.App):
             "Paste URL:",
             font_family="Gotu",
             font_size=14,
-            margin=(16,4,4,16),
+            margin=(16,4,2,20),
         )
         self.hint_box = toga.Box(children=[hint_label])
 
@@ -362,14 +362,14 @@ class VsLoader(toga.App):
                                         flex=1,
                                         validators=[validate_url],
                                         style=Pack(
-                                            height=45,
+                                            height=48,
                                             margin_left=8))
         # paste button
         self.paste_button = toga.Button(
             icon=toga.Icon("resources/bolt_512"),
             on_press=self.paste_and_load,
-            margin=(4, 0, 0, 8),
-            style=Pack(width=48) # Forces the button to remain comfortably wide
+            margin=(4,0,0,8),
+            style=Pack(width=48) # Forces the button to remain comfortable size
         )
         self.paste_button.style.visibility = 'visible'
 
@@ -597,6 +597,18 @@ class VsLoader(toga.App):
         # disable textinputs
         self.url_input.enabled = False
         self.filename_input.enabled = False
+        
+        # --- CRITICAL FIX: Re-apply Native iOS Styling AFTER setting the image ---
+        import sys
+        if sys.platform == 'ios':
+            try:
+                native_img_view = self.image_view._impl.native
+                native_img_view.contentMode = 2 # UIViewContentModeScaleAspectFill
+                native_img_view.clipsToBounds = True
+                native_img_view.layer.cornerRadius = 16.0
+            except Exception as e:
+                print(f"Could not re-apply iOS native image styling: {e}")
+        # -------------------------------------------------------------------------
 
     def input_change(self, widget):
         if self.url_input.value == "":
@@ -702,8 +714,8 @@ class VsLoader(toga.App):
                 # 1. Load URL natively in iOS WebKit
                 self.main_webview.url = target_url
 
-                # 2. REVERT: Give the page a hard 4 seconds to load the React DOM
-                await asyncio.sleep(4.0)
+                # 2. REVERT: Give the page a hard 1.2 seconds to load the React DOM
+                await asyncio.sleep(1.2)
 
                 # 3. Extract HTML via JavaScript
                 html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
@@ -857,6 +869,19 @@ class VsLoader(toga.App):
             self.url_input.enabled = True
             self.paste_button.enabled = True
             self.filename_input.enabled = True
+            
+            # --- CRITICAL FIX: Re-apply Native iOS Styling AFTER setting the image ---
+            import sys
+            if sys.platform == 'ios':
+                try:
+                    native_img_view = self.image_view._impl.native
+                    native_img_view.contentMode = 2 # UIViewContentModeScaleAspectFill
+                    native_img_view.clipsToBounds = True
+                    native_img_view.layer.cornerRadius = 16.0
+                except Exception as e:
+                    print(f"Could not re-apply iOS native image styling: {e}")
+            # -------------------------------------------------------------------------
+            
             print("finished showing finished layout!")
             
         except Exception as e:
