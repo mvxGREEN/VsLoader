@@ -351,7 +351,7 @@ class VsLoader(toga.App):
             "Paste URL:",
             font_family="Gotu",
             font_size=14,
-            margin=(4,4,4,16),
+            margin=(16,4,4,16),
         )
         self.hint_box = toga.Box(children=[hint_label])
 
@@ -368,8 +368,8 @@ class VsLoader(toga.App):
         self.paste_button = toga.Button(
             icon=toga.Icon("resources/bolt_512"),
             on_press=self.paste_and_load,
-            margin=(0, 0, 0, 4),
-            style=Pack(width=45) # Forces the button to remain comfortably wide
+            margin=(4, 0, 0, 8),
+            style=Pack(width=48) # Forces the button to remain comfortably wide
         )
         self.paste_button.style.visibility = 'visible'
 
@@ -408,10 +408,6 @@ class VsLoader(toga.App):
         self.url_box = toga.Box(margin=(0, 8))
         self.url_box.add(self.url_input)
         self.url_box.add(self.paste_button)
-        
-        self.url_box = toga.Box(margin=(0, 8))
-        self.url_box.add(self.url_input)
-        self.url_box.add(self.paste_button)
 
         # main box
         self.main_box.add(self.hint_box)
@@ -422,9 +418,31 @@ class VsLoader(toga.App):
         self.main_box.add(self.preview_box)
 
         # image box
-        self.image_view = toga.ImageView(image=None, height=320, direction=COLUMN, flex=1)
-        self.image_box = toga.Box(children=[self.image_view], direction=COLUMN, margin=8)
+        # We use a fixed width and height (340x340) to force a perfect square
+        # that fills up most of an iPhone screen, and center it in the box.
+        self.image_view = toga.ImageView(image=None, style=Pack(width=340, height=340))
+        self.image_box = toga.Box(children=[self.image_view], style=Pack(direction=COLUMN, alignment=CENTER, padding_top=16, padding_bottom=16))
         self.preview_box.add(self.image_box)
+
+        # --- iOS Native Image Styling (Aspect Fill & Rounded Corners) ---
+        import sys
+        if sys.platform == 'ios':
+            try:
+                # Access the underlying native iOS UIImageView
+                native_img_view = self.image_view._impl.native
+                
+                # UIViewContentModeScaleAspectFill (2) forces the image to fill the square and crop the excess
+                native_img_view.contentMode = 2
+                
+                # clipsToBounds ensures the cropped excess and corners are visually hidden
+                native_img_view.clipsToBounds = True
+                
+                # Apply a smooth continuous Apple-style corner radius
+                native_img_view.layer.cornerRadius = 16.0
+                
+            except Exception as e:
+                print(f"Could not apply iOS native image styling: {e}")
+        # ----------------------------------------------------------------
 
         # filename box
         self.filename_input_label = toga.Label(
@@ -504,7 +522,6 @@ class VsLoader(toga.App):
 
             def fetch_thumbnail():
                 import sys
-                
                 if sys.platform == 'ios':
                     import ctypes
                     from rubicon.objc import ObjCClass
@@ -525,9 +542,7 @@ class VsLoader(toga.App):
                     if data is None:
                         raise Exception("Native iOS download blocked or failed for thumbnail.")
                     
-                    # Safely read the raw bytes from the Objective-C NSData pointer
                     return ctypes.string_at(data.bytes, data.length)
-                
                 else:
                     import urllib.request
                     req = urllib.request.Request(
@@ -540,7 +555,21 @@ class VsLoader(toga.App):
             image_bytes_data = await asyncio.to_thread(fetch_thumbnail)
             image_bytes = BytesIO(image_bytes_data)
             toga_image = toga.Image(src=image_bytes.read())
+            
+            # Set the image (Toga will stretch it here by default)
             self.image_view.image = toga_image
+            
+            # --- CRITICAL FIX: Re-apply Native iOS Styling AFTER setting the image ---
+            import sys
+            if sys.platform == 'ios':
+                try:
+                    native_img_view = self.image_view._impl.native
+                    native_img_view.contentMode = 2 # UIViewContentModeScaleAspectFill
+                    native_img_view.clipsToBounds = True
+                    native_img_view.layer.cornerRadius = 16.0
+                except Exception as e:
+                    print(f"Could not re-apply iOS native image styling: {e}")
+            # -------------------------------------------------------------------------
             
         except Exception as e:
             print(f"Error loading image: {e}")
