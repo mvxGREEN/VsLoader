@@ -350,8 +350,8 @@ class VsLoader(toga.App):
         hint_label = toga.Label(
             "Paste URL:",
             font_family="Gotu",
-            font_size=13,
-            margin=(8,8,8,17),
+            font_size=14,
+            margin=(4,4,4,16),
         )
         self.hint_box = toga.Box(children=[hint_label])
 
@@ -435,10 +435,7 @@ class VsLoader(toga.App):
         self.filename_input = toga.TextInput(
             margin=(8, 12, 8, 4),
             direction=ROW,
-            flex=1,
-            style=Pack(
-                font_family="Gotu"
-            ))
+            flex=1)
         filename_box = toga.Box(direction=ROW)
         filename_box.add(self.filename_input_label)
         filename_box.add(self.filename_input)
@@ -466,7 +463,7 @@ class VsLoader(toga.App):
         self.download_button.style.visibility = 'hidden'
 
         # main window
-        self.main_window = toga.MainWindow(title="MusiLoader")
+        self.main_window = toga.MainWindow(title="VsLoader")
         self.main_window.content = self.main_box
         self.main_window.show()
 
@@ -616,11 +613,20 @@ class VsLoader(toga.App):
                 return ""
 
     async def paste_and_load(self, widget):
-        """Action for the lightning button."""
+        """Action for the bolt button."""
         clip_text = self.get_clipboard_text()
+        
         if clip_text:
             # Updating the value automatically fires the input_change event!
             self.url_input.value = clip_text
+        else:
+            # Alert the user if there is nothing to paste
+            await self.main_window.dialog(
+                toga.InfoDialog(
+                    "Clipboard Empty",
+                    "There is no text copied to your clipboard to paste."
+                )
+            )
 
     async def load_input(self, widget):
         # Guard clause: Prevent double-triggering
