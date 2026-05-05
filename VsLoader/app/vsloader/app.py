@@ -88,107 +88,6 @@ def validate_url(value):
         raise ValueError("Please paste a valid VSCO link (vsco.co or vs.co)")
 
 
-async def extract_vsco_info(vsco_url, resolution):
-    """
-    Extracts VSCO media directly from HTML using curl_cffi
-    to bypass Cloudflare TLS fingerprinting blocks.
-    """
-    print(f"Starting HTML extraction for: {vsco_url}")
-    
-    # delay
-    await asyncio.sleep(0.043)
-    
-    def extract():
-        target_url = vsco_url
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        
-        # The 'impersonate' argument handles all the complex TLS spoofing
-        # and header generation automatically!
-        res = requests.get(target_url, headers=headers, timeout=15, allow_redirects=True)
-        
-        target_url = res.url.split('?')[0]
-        html = res.text
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-
-        # Fallback shortlink resolution
-        if "vs.co/" in target_url:
-            canonical_match = re.search(r'(https://vsco\.co/[^"\'\s>]+)', html)
-            if canonical_match:
-                target_url = canonical_match.group(1).split('?')[0]
-                # Re-fetch with impersonation
-                res = requests.get(target_url, headers=headers, timeout=15)
-                html = res.text
-
-        if res.status_code == 403:
-            raise Exception("Cloudflare is still blocking the request. Your IP may be temporarily flagged.")
-
-        # --- The rest of your regex extraction logic stays exactly the same ---
-        download_url = ""
-        thumbnail_url = ""
-        ext = "jpg"
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        
-        video_match = re.search(r'property="og:video" content="([^"]+)"', html)
-        if video_match:
-            v_url = video_match.group(1).replace("&amp;", "&")
-            v_res = requests.get(v_url, headers=headers, timeout=15)
-            v_html = v_res.text
-            
-            mux_match = re.search(r'(stream\.mux\.com[^"]+)', v_html)
-            if mux_match:
-                download_url = "https://" + mux_match.group(1).replace("\\u002F", "/")
-                ext = "mp4"
-            else:
-                mp4_match = re.search(r'(https://[^"]+\.mp4)', v_html)
-                if mp4_match:
-                    download_url = mp4_match.group(1)
-                    ext = "mp4"
-
-        if not download_url:
-            image_match = re.search(r'property="og:image" content="([^"]+)"', html)
-            if image_match:
-                download_url = image_match.group(1).split('?')[0]
-                ext = "jpg"
-
-        if ext == "mp4":
-            poster_match = re.search(r'property="og:image" content="([^"]+)"', html)
-            if poster_match:
-                thumbnail_url = poster_match.group(1)
-        else:
-            thumbnail_url = download_url
-
-        if not download_url:
-            raise Exception("Could not find media URLs in the page HTML.")
-
-        title_match = re.search(r'<title>(.*?)</title>', html)
-        title = "vsco_media"
-        if title_match:
-            raw_title = title_match.group(1)
-            parts = raw_title.split("|")
-            title = parts[-2].strip() if len(parts) >= 3 else (parts[0].strip() if parts else raw_title.strip())
-            title = re.sub(r'[^a-zA-Z0-9_\-]', '', title.replace(' ', '_'))
-            if not title:
-                title = "vsco_download"
-
-        return {
-            "title": title,
-            "ext": ext,
-            "thumbnail": thumbnail_url,
-            "download_url": download_url
-        }
-
-    return await asyncio.to_thread(extract)
-
-
 async def dl_vsco_async(download_url, out_path, filename, ext, progress_hook):
     """Downloads the direct media URL natively on iOS."""
     print(f"starting dl_vsco_async for direct URL: {download_url}")
@@ -481,7 +380,7 @@ class VsLoader(toga.App):
         self.download_button.style.visibility = 'hidden'
 
         # main window
-        self.main_window = toga.MainWindow(title="VsLoader")
+        self.main_window = toga.MainWindow(title="VSCLoader")
         self.main_window.content = self.main_box
         self.main_window.show()
 
@@ -720,15 +619,20 @@ class VsLoader(toga.App):
                 if "vs.co" in target_url:
                     print("[LOG] Shortlink detected (vs.co). Resolving via WebView...")
                     self.main_webview.url = target_url
-                    await asyncio.sleep(4.0) # Give WebKit time to follow redirects
                     
-                    # Grab the final resolved URL from the WebView
-                    resolved_url = await self.main_webview.evaluate_javascript("window.location.href")
-                    if resolved_url and "vsco.co" in resolved_url:
-                        target_url = resolved_url.split('?')[0]
-                        print(f"[LOG] Shortlink resolved to: {target_url}")
-                    else:
-                        print(f"[LOG] Warning: Could not cleanly resolve shortlink. WebView is at: {resolved_url}")
+                    # SMART POLLING: Check the URL every 0.2 seconds instead of waiting 4 seconds
+                    elapsed = 0.0
+                    while elapsed < 5.0:
+                        await asyncio.sleep(0.2)
+                        elapsed += 0.2
+                        resolved_url = await self.main_webview.evaluate_javascript("window.location.href")
+                        
+                        if resolved_url and "vsco.co" in resolved_url:
+                            target_url = resolved_url.split('?')[0]
+                            print(f"[LOG] Shortlink resolved instantly to: {target_url} in {elapsed:.1f}s")
+                            break
+                        else:
+                            print(f"[LOG] Warning: Could not cleanly resolve shortlink. WebView is at: {resolved_url}")
 
                 # Determine if this is a single post or a profile/collection
                 is_profile = "/media/" not in target_url and "/video/" not in target_url
@@ -743,8 +647,8 @@ class VsLoader(toga.App):
                     
                     self.main_webview.url = target_url
 
-                    print("[LOG] Waiting 3.9 seconds for WebKit to render the profile DOM...")
-                    await asyncio.sleep(3.9)
+                    print("[LOG] Waiting 3.4 seconds for WebKit to render the profile DOM...")
+                    await asyncio.sleep(3.4)
                     raw_html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
                     
                     # Force raw_html to be a string so Python never throws a NoneType crash
@@ -848,19 +752,69 @@ class VsLoader(toga.App):
                 else:
                     print("[LOG] --- EXECUTING SINGLE MEDIA LOGIC ---")
                     self.batch_urls = []
-                    self.main_webview.url = target_url
                     
-                    print("[LOG] Waiting 1.6 seconds for single media page to load...")
-                    await asyncio.sleep(1.6)
-
-                    html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
-                    if html and ("just a moment" in html.lower() or "cloudflare" in html.lower()):
-                        print("[LOG] Cloudflare challenge detected, waiting 1.3 more seconds...")
-                        await asyncio.sleep(1.3)
-                        html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
+                    # --- NEW: FAST PATH NATIVE FETCH ---
+                    print("[LOG] Attempting lightning-fast native extraction...")
+                    
+                    def fetch_fast_html():
+                        import sys
+                        if sys.platform == 'ios':
+                            import ctypes
+                            from rubicon.objc import ObjCClass
+                            NSURL = ObjCClass('NSURL')
+                            NSMutableURLRequest = ObjCClass('NSMutableURLRequest')
+                            NSURLConnection = ObjCClass('NSURLConnection')
+                            
+                            url_obj = NSURL.URLWithString_(str(target_url))
+                            req = NSMutableURLRequest.requestWithURL_(url_obj)
+                            req.setValue_forHTTPHeaderField_(
+                                "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15",
+                                "User-Agent"
+                            )
+                            data = NSURLConnection.sendSynchronousRequest_returningResponse_error_(req, None, None)
+                            if data is None: return ""
+                            return ctypes.string_at(data.bytes, data.length).decode('utf-8', errors='ignore')
+                        else:
+                            import urllib.request
+                            req = urllib.request.Request(
+                                target_url,
+                                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                            )
+                            try:
+                                with urllib.request.urlopen(req, timeout=5) as response:
+                                    return response.read().decode('utf-8', errors='ignore')
+                            except Exception:
+                                return ""
+                                
+                    fast_html = await asyncio.to_thread(fetch_fast_html)
+                    
+                    html = ""
+                    # Check if the fast path succeeded and didn't hit Cloudflare
+                    if fast_html and "just a moment" not in fast_html.lower() and ('property="og:image"' in fast_html or 'property="og:video"' in fast_html or 'im.vsco.co' in fast_html):
+                        print("[LOG] Fast path extraction successful! Bypassed WebView entirely.")
+                        html = fast_html
+                    else:
+                        print("[LOG] Fast path hit Cloudflare or failed. Falling back to WebView polling...")
+                        self.main_webview.url = target_url
+                        elapsed = 0.0
+                        
+                        while elapsed < 5.0:
+                            await asyncio.sleep(0.2)
+                            elapsed += 0.2
+                            
+                            raw_html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
+                            html = str(raw_html) if raw_html else ""
+                            
+                            if "just a moment" in html.lower() or "cloudflare" in html.lower():
+                                continue # Keep waiting for Cloudflare to clear
+                                
+                            # Break instantly the millisecond we see standard VSCO media tags!
+                            if 'property="og:image"' in html or 'property="og:video"' in html or 'im.vsco.co' in html:
+                                print(f"[LOG] DOM loaded in {elapsed:.1f}s via WebView!")
+                                break
 
                     if not html:
-                        print("[LOG] FATAL: WebView failed to return HTML.")
+                        print("[LOG] FATAL: Failed to retrieve HTML via both Fast Path and WebView.")
                         raise Exception("WebView failed to load the HTML.")
 
                     print("[LOG] Parsing HTML for media tags...")
@@ -868,8 +822,21 @@ class VsLoader(toga.App):
                     self.current_download_url = info["download_url"]
                     self.current_ext = info["ext"]
                     
+                    # --- Extract username natively from the resolved URL ---
+                    title = info["title"]
+                    try:
+                        if "vsco.co/" in target_url:
+                            extracted_name = target_url.split("vsco.co/")[1].split("/")[0]
+                            # Safety check to ensure we didn't grab an internal routing word
+                            if extracted_name and extracted_name not in ["media", "video"]:
+                                title = extracted_name
+                    except Exception as e:
+                        print(f"[LOG] URL Username extraction failed: {e}")
+                    
                     print(f"[LOG] Single media extracted successfully. Type: {self.current_ext}")
-                    await self.show_preview_layout(sanitize_filename(info["title"][0:23]), info["thumbnail"])
+                    
+                    # Pass our new URL-extracted title into the preview layout
+                    await self.show_preview_layout(sanitize_filename(title[0:23]), info["thumbnail"])
                 
             except Exception as e:
                 print(f"[LOG] EXTRACTION ERROR: {e}")

@@ -386,14 +386,14 @@
 				GCC_PREFIX_HEADER = "VsLoader/VsLoader-Prefix.pch";
 				HEADER_SEARCH_PATHS = "\"$(BUILT_PRODUCTS_DIR)/Python.framework/Headers\"";
 				INFOPLIST_FILE = "VsLoader/VsLoader-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = VsLoader;
+				INFOPLIST_KEY_CFBundleDisplayName = VSCLoader;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.0.1;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = green.mobileapps.vsloader;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				WRAPPER_EXTENSION = app;
@@ -414,14 +414,14 @@
 				GCC_PREFIX_HEADER = "VsLoader/VsLoader-Prefix.pch";
 				HEADER_SEARCH_PATHS = "\"$(BUILT_PRODUCTS_DIR)/Python.framework/Headers\"";
 				INFOPLIST_FILE = "VsLoader/VsLoader-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = VsLoader;
+				INFOPLIST_KEY_CFBundleDisplayName = VSCLoader;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.0.1;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = green.mobileapps.vsloader;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				WRAPPER_EXTENSION = app;
