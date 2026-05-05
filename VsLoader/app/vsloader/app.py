@@ -576,7 +576,7 @@ class VsLoader(toga.App):
         finally:
             self.url_input.enabled = True
             self.paste_button.enabled = True
-            self.filename_input.enabled = True
+            self.filename_input.enabled = False
             self.filename_input.value = filename
             
             # Update button UI if a batch was loaded
@@ -743,16 +743,16 @@ class VsLoader(toga.App):
                     
                     self.main_webview.url = target_url
 
-                    print("[LOG] Waiting 5 seconds for WebKit to render the profile DOM...")
-                    await asyncio.sleep(5.0)
+                    print("[LOG] Waiting 3.9 seconds for WebKit to render the profile DOM...")
+                    await asyncio.sleep(3.9)
                     raw_html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
                     
                     # Force raw_html to be a string so Python never throws a NoneType crash
                     raw_html = raw_html or ""
                     
                     if "just a moment" in raw_html.lower() or "cloudflare" in raw_html.lower():
-                        print("[LOG] Cloudflare challenge detected! Waiting 3 extra seconds...")
-                        await asyncio.sleep(3.0)
+                        print("[LOG] Cloudflare challenge detected! Waiting 1.8 extra seconds...")
+                        await asyncio.sleep(1.8)
                         raw_html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
                         raw_html = raw_html or ""
 
@@ -850,13 +850,13 @@ class VsLoader(toga.App):
                     self.batch_urls = []
                     self.main_webview.url = target_url
                     
-                    print("[LOG] Waiting 4 seconds for single media page to load...")
-                    await asyncio.sleep(4.0)
+                    print("[LOG] Waiting 1.6 seconds for single media page to load...")
+                    await asyncio.sleep(1.6)
 
                     html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
                     if html and ("just a moment" in html.lower() or "cloudflare" in html.lower()):
-                        print("[LOG] Cloudflare challenge detected, waiting 3 more seconds...")
-                        await asyncio.sleep(3.0)
+                        print("[LOG] Cloudflare challenge detected, waiting 1.3 more seconds...")
+                        await asyncio.sleep(1.3)
                         html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
 
                     if not html:
@@ -1163,7 +1163,7 @@ class VsLoader(toga.App):
             self.download_button.text = "Finished!"
             self.url_input.enabled = True
             self.paste_button.enabled = True
-            self.filename_input.enabled = True
+            self.filename_input.enabled = False
             
             # Allow screen sleep after download finished
             if sys.platform == 'ios':
@@ -1180,7 +1180,7 @@ class VsLoader(toga.App):
             self.progress.style.visibility = 'hidden'
             self.url_input.enabled = True
             self.paste_button.enabled = True
-            self.filename_input.enabled = True
+            self.filename_input.enabled = False
             await self.main_window.dialog(toga.InfoDialog("Download Failed", str(e)))
 
 
