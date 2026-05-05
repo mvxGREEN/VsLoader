@@ -578,6 +578,13 @@ class VsLoader(toga.App):
             self.paste_button.enabled = True
             self.filename_input.enabled = True
             self.filename_input.value = filename
+            
+            # Update button UI if a batch was loaded
+            if hasattr(self, 'batch_urls') and len(self.batch_urls) > 1:
+                self.download_button.text = f"Download {len(self.batch_urls)} Items"
+            else:
+                self.download_button.text = "Download"
+
             self.image_view.style.visibility = 'visible'
             self.filename_input_label.style.visibility = 'visible'
             self.filename_input.style.visibility = 'visible'
@@ -689,73 +696,315 @@ class VsLoader(toga.App):
             )
 
     async def load_input(self, widget):
-        # Guard clause: Prevent double-triggering
         if not self.url_input.enabled:
             return
 
-        # hide keyboard
         self.app.main_window.content = self.app.main_window.content
-
-        # VSCO specific regex
         url_pattern = re.compile(r"^(?:https?://)?(?:www\.)?(?:vsco\.co|vs\.co)(?:/.*)?$", re.IGNORECASE)
 
-        # validate input with regex
+        print(f"\n[LOG] ====== NEW LOAD INITIATED ======")
+        print(f"[LOG] Raw Input: {self.url_input.value}")
+
         if self.url_input.value and url_pattern.match(self.url_input.value):
-            # show loading ui
             self.show_loading_layout()
 
             try:
                 target_url = self.url_input.value
-                
-                # Safety check: WebView requires a scheme
                 if not target_url.startswith("http"):
                     target_url = "https://" + target_url
 
-                # 1. Load URL natively in iOS WebKit
-                self.main_webview.url = target_url
+                print(f"[LOG] Formatted target URL: {target_url}")
 
-                # 2. REVERT: Give the page a hard 1.2 seconds to load the React DOM
-                await asyncio.sleep(1.2)
+                # --- NEW: SHORTLINK RESOLUTION ---
+                if "vs.co" in target_url:
+                    print("[LOG] Shortlink detected (vs.co). Resolving via WebView...")
+                    self.main_webview.url = target_url
+                    await asyncio.sleep(4.0) # Give WebKit time to follow redirects
+                    
+                    # Grab the final resolved URL from the WebView
+                    resolved_url = await self.main_webview.evaluate_javascript("window.location.href")
+                    if resolved_url and "vsco.co" in resolved_url:
+                        target_url = resolved_url.split('?')[0]
+                        print(f"[LOG] Shortlink resolved to: {target_url}")
+                    else:
+                        print(f"[LOG] Warning: Could not cleanly resolve shortlink. WebView is at: {resolved_url}")
 
-                # 3. Extract HTML via JavaScript
-                html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
-                
-                # Check if Cloudflare challenged us
-                if html and ("just a moment" in html.lower() or "cloudflare" in html.lower()):
-                    print("Cloudflare challenge detected. Waiting 3 more seconds...")
-                    await asyncio.sleep(3.0)
+                # Determine if this is a single post or a profile/collection
+                is_profile = "/media/" not in target_url and "/video/" not in target_url
+
+                print(f"[LOG] Mode selection -> is_profile: {is_profile}")
+
+                if is_profile:
+                    print("[LOG] --- EXECUTING BATCH PROFILE LOGIC ---")
+                    if not target_url.endswith("/gallery") and "/collection" not in target_url:
+                        target_url = target_url.rstrip("/") + "/gallery"
+                        print(f"[LOG] Adjusted profile URL to: {target_url}")
+                    
+                    self.main_webview.url = target_url
+
+                    print("[LOG] Waiting 5 seconds for WebKit to render the profile DOM...")
+                    await asyncio.sleep(5.0)
+                    raw_html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
+                    
+                    # Force raw_html to be a string so Python never throws a NoneType crash
+                    raw_html = raw_html or ""
+                    
+                    if "just a moment" in raw_html.lower() or "cloudflare" in raw_html.lower():
+                        print("[LOG] Cloudflare challenge detected! Waiting 3 extra seconds...")
+                        await asyncio.sleep(3.0)
+                        raw_html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
+                        raw_html = raw_html or ""
+
+                    self.batch_urls = []
+                    
+                    # --- PHASE 1: Direct HTML Extraction ---
+                    print("[LOG] Phase 1: Extracting pre-rendered items from the DOM...")
+                    
+                    # 1. Grab all im.vsco.co image links directly from the rendered HTML tags
+                    img_matches = re.findall(r'(?:https?://)?im\.vsco\.co/[^"\'\s\\]+', raw_html)
+                    for dlu in img_matches:
+                        if not dlu.startswith("http"):
+                            dlu = "https://" + dlu
+                        dlu = dlu.replace('\\/', '/').replace('\\u002F', '/').split('?')[0]
+                        if dlu not in self.batch_urls:
+                            self.batch_urls.append(dlu)
+                            
+                    # 2. Grab all Mux video IDs from the DOM
+                    mux_matches = re.findall(r'stream\.mux\.com(?:/|\\/|\\u002F)([a-zA-Z0-9_-]+)', raw_html)
+                    for playback_id in mux_matches:
+                        dlu = f"https://stream.mux.com/{playback_id}/high.mp4"
+                        if dlu not in self.batch_urls:
+                            self.batch_urls.append(dlu)
+
+                    print(f"[LOG] Phase 1 Complete. Found {len(self.batch_urls)} initial items.")
+
+                    # --- PHASE 2: Pagination Hijacking ---
+                    print("[LOG] Phase 2: Attempting to hijack browser fetch to steal API headers...")
+                    
+                    intercepted_json = None
+                    timeout = 8.0 # We don't need 15 seconds. If it fires, it fires quickly.
+                    poll_interval = 0.5
+                    elapsed = 0.0
+
+                    js_hijack = """
+                    (function() {
+                        if (!window.vscoHijacked) {
+                            window.vscoHijacked = true;
+                            window.vscoApiInfo = null;
+                            const origFetch = window.fetch;
+                            window.fetch = async function(resource, options) {
+                                const url = typeof resource === 'string' ? resource : resource.url;
+                                if (url && (url.includes('medias/profile') || url.includes('medias/videos') || url.includes('medias/collection'))) {
+                                    let extractedHeaders = {};
+                                    if (options && options.headers) {
+                                        if (options.headers instanceof Headers) {
+                                            options.headers.forEach((value, key) => { extractedHeaders[key] = value; });
+                                        } else {
+                                            extractedHeaders = options.headers;
+                                        }
+                                    }
+                                    window.vscoApiInfo = { url: url, headers: extractedHeaders };
+                                }
+                                return origFetch.apply(this, arguments);
+                            };
+                        }
+                        // Force a scroll to physically trigger VSCO's API pagination
+                        window.scrollTo(0, document.body.scrollHeight);
+                        setTimeout(() => window.scrollTo(0, document.body.scrollHeight - 100), 100);
+                        setTimeout(() => window.scrollTo(0, document.body.scrollHeight), 200);
+                        
+                        return window.vscoApiInfo ? JSON.stringify(window.vscoApiInfo) : null;
+                    })();
+                    """
+
+                    while elapsed < timeout:
+                        await asyncio.sleep(poll_interval)
+                        elapsed += poll_interval
+                        
+                        raw_intercept = await self.main_webview.evaluate_javascript(js_hijack)
+                        
+                        # --- SAFETY FIX 1: Strict type handling for iOS WebKit ---
+                        if raw_intercept is None:
+                            continue
+                            
+                        # If iOS leaks a raw NSString object, decode it natively
+                        if hasattr(raw_intercept, 'UTF8String'):
+                            try:
+                                intercepted_str = raw_intercept.UTF8String().decode('utf-8')
+                            except Exception:
+                                intercepted_str = str(raw_intercept)
+                        else:
+                            intercepted_str = str(raw_intercept)
+                            
+                        # Ensure the string is actually JSON before breaking the loop
+                        if intercepted_str and intercepted_str not in ["null", "None", "", "undefined"]:
+                            intercepted_json = intercepted_str
+                            print(f"[LOG] API Intercepted successfully in {elapsed:.2f} seconds!")
+                            break
+
+                    if intercepted_json:
+                        print("[LOG] Moving to fetch_profile_media recursive loop...")
+                        await self.fetch_profile_media(intercepted_json)
+                    else:
+                        print("[LOG] WARNING: Timed out intercepting API. Proceeding with Phase 1 items only.")
+
+                    if not self.batch_urls:
+                        print("[LOG] FATAL: No media found on this profile.")
+                        raise Exception("No media found on this profile.")
+
+                    print(f"[LOG] Profile batch complete. Total items queued: {len(self.batch_urls)}")
+
+                    title = target_url.split("vsco.co/")[1].split("/")[0]
+                    filename = sanitize_filename(title)
+                    thumbnail_url = self.batch_urls[0]
+                    
+                    await self.show_preview_layout(filename, thumbnail_url)
+
+                else:
+                    print("[LOG] --- EXECUTING SINGLE MEDIA LOGIC ---")
+                    self.batch_urls = []
+                    self.main_webview.url = target_url
+                    
+                    print("[LOG] Waiting 4 seconds for single media page to load...")
+                    await asyncio.sleep(4.0)
+
                     html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
+                    if html and ("just a moment" in html.lower() or "cloudflare" in html.lower()):
+                        print("[LOG] Cloudflare challenge detected, waiting 3 more seconds...")
+                        await asyncio.sleep(3.0)
+                        html = await self.main_webview.evaluate_javascript("document.documentElement.innerHTML")
 
-                if not html:
-                    raise Exception("WebView failed to load the HTML.")
+                    if not html:
+                        print("[LOG] FATAL: WebView failed to return HTML.")
+                        raise Exception("WebView failed to load the HTML.")
 
-                # 4. Parse the DOM
-                info = self.parse_vsco_html(html)
-                title = info["title"]
-                ext = info["ext"]
-                thumbnail_url = info["thumbnail"]
-                filename = sanitize_filename(title[0:23])
-
-                # SAVE INFO TO THE CLASS INSTANCE
-                self.current_download_url = info["download_url"]
-                self.current_ext = ext
-
-                await self.show_preview_layout(filename, thumbnail_url)
+                    print("[LOG] Parsing HTML for media tags...")
+                    info = self.parse_vsco_html(html)
+                    self.current_download_url = info["download_url"]
+                    self.current_ext = info["ext"]
+                    
+                    print(f"[LOG] Single media extracted successfully. Type: {self.current_ext}")
+                    await self.show_preview_layout(sanitize_filename(info["title"][0:23]), info["thumbnail"])
                 
             except Exception as e:
-                print(f"Extraction Error: {e}")
+                print(f"[LOG] EXTRACTION ERROR: {e}")
                 self.url_input.enabled = True
                 self.paste_button.enabled = True
                 self.progress.stop()
                 self.progress.style.visibility = 'hidden'
-                
-                await self.main_window.dialog(
-                    toga.InfoDialog("Extraction Failed", str(e))
-                )
+                await self.main_window.dialog(toga.InfoDialog("Extraction Failed", str(e)))
         else:
-            await self.main_window.dialog(
-                toga.InfoDialog("Error: Invalid URL", "Please paste a valid VSCO link.")
-            )
+            print("[LOG] Validation failed: Invalid URL pasted.")
+            await self.main_window.dialog(toga.InfoDialog("Error: Invalid URL", "Please paste a valid VSCO link."))
+            
+    async def fetch_profile_media(self, intercepted_json_str):
+        print("\n[LOG] --- BEGINNING RECURSIVE API FETCH ---")
+        
+        # Log exactly what we are trying to parse so we can debug if it fails again
+        preview = str(intercepted_json_str)[:150]
+        print(f"[LOG] Intercepted payload preview: {preview}")
+        
+        import urllib.parse
+        import json
+        import re
+        
+        # --- SAFETY FIX 2: Graceful Fallback if JSON decode fails ---
+        try:
+            api_info = json.loads(intercepted_json_str)
+            base_url = api_info.get('url', '')
+            headers = api_info.get('headers', {})
+        except Exception as e:
+            print(f"[LOG] JSON Decode Error: {e}. Attempting Regex Fallback...")
+            
+            # Bypass JSON entirely and manually scrape the raw string!
+            url_match = re.search(r'"url"\s*:\s*"([^"]+)"', str(intercepted_json_str))
+            base_url = url_match.group(1) if url_match else ""
+            
+            auth_match = re.search(r'"[Aa]uthorization"\s*:\s*"([^"]+)"', str(intercepted_json_str))
+            headers = {"Authorization": auth_match.group(1)} if auth_match else {}
+            
+        if not base_url:
+            print("[LOG] FATAL: Could not parse base URL from intercepted payload.")
+            return # Safely exit the recursion and just rely on the Phase 1 HTML items!
+            
+        print(f"[LOG] Base API URL extracted: {base_url.split('?')[0]}")
+
+        if "limit=" in base_url:
+            base_url = base_url.split("limit=")[0] + "limit=14&cursor="
+        else:
+            base_url += "&limit=14&cursor="
+
+        visited_cursors = set()
+        cursor = ""
+        
+        while len(visited_cursors) < 200:
+            current_url = base_url + urllib.parse.quote(cursor)
+            print(f"[LOG] Fetching API page {len(visited_cursors) + 1}...")
+            
+            js_fetch = f"""
+            window.vscoFetchResult = "PENDING";
+            fetch("{current_url}", {{headers: {json.dumps(headers)}}})
+                .then(res => res.text())
+                .then(text => window.vscoFetchResult = text)
+                .catch(err => window.vscoFetchResult = "ERROR");
+            """
+            await self.main_webview.evaluate_javascript(js_fetch)
+            
+            response_text = "PENDING"
+            while response_text == "PENDING":
+                raw_response = await self.main_webview.evaluate_javascript("window.vscoFetchResult")
+                
+                # Apply the same strict iOS WebKit decoding here
+                if raw_response is None:
+                    pass # Keep response_text as "PENDING"
+                elif hasattr(raw_response, 'UTF8String'):
+                    try:
+                        response_text = raw_response.UTF8String().decode('utf-8')
+                    except Exception:
+                        response_text = str(raw_response)
+                else:
+                    response_text = str(raw_response)
+                    
+                await asyncio.sleep(0.1)
+                
+            if not response_text or response_text == "ERROR":
+                print("[LOG] API fetch returned ERROR or was empty. Stopping recursion.")
+                break
+
+            # Parse JSON string for media URLs safely using Regex
+            items_added = 0
+            
+            # Match both responsive_url and responsiveUrl
+            img_matches = re.findall(r'"responsive_?[uU]rl"\s*:\s*"([^"]+)"', response_text)
+            for dlu in img_matches:
+                dlu = "https://" + dlu.replace('\\/', '/').replace('\\u002F', '/').split('?')[0]
+                if dlu not in self.batch_urls:
+                    self.batch_urls.append(dlu)
+                    items_added += 1
+
+            # Match videos in JSON via Mux IDs
+            mux_matches = re.findall(r'stream\.mux\.com(?:/|\\/|\\u002F)([a-zA-Z0-9_-]+)', response_text)
+            for playback_id in mux_matches:
+                dlu = f"https://stream.mux.com/{playback_id}/high.mp4"
+                if dlu not in self.batch_urls:
+                    self.batch_urls.append(dlu)
+                    items_added += 1
+
+            print(f"[LOG] Added {items_added} items from API page {len(visited_cursors) + 1}. Total queue: {len(self.batch_urls)}")
+
+            if "next_cursor" in response_text and items_added > 0:
+                cursor_start = response_text.find("next_cursor")
+                match = re.search(r'"next_cursor"\s*:\s*"([^"]+)"', response_text[cursor_start:])
+                if match:
+                    cursor_val = match.group(1)
+                    if cursor_val and cursor_val != "null" and cursor_val not in visited_cursors:
+                        visited_cursors.add(cursor_val)
+                        cursor = cursor_val
+                        await asyncio.sleep(0.3)
+                        continue
+            
+            print("[LOG] No next_cursor found, or items exhausted. Ending API loop.")
+            break
             
     def parse_vsco_html(self, html):
         download_url = ""
@@ -839,63 +1088,53 @@ class VsLoader(toga.App):
         
         
     async def download_input(self, widget):
-        # hide keyboard
         self.app.main_window.content = self.app.main_window.content
-
-        # update ui state
         await self.show_downloading_layout()
 
-        pb = self.progress
-        ph = await create_progress_hook(pb)
-
-        dl_task = asyncio.create_task(
-            dl_vsco_async(self.current_download_url,
-                           get_dest_path(),
-                           f"{self.filename_input.value}",
-                           self.current_ext,
-                           ph))
-        
         try:
-            await dl_task
-            print("finished download!")
-            
-            # stop progress bar
-            self.progress.stop()
-            self.progress.max = 100
-            self.progress.value = 100
+            # --- BATCH DOWNLOAD LOOP ---
+            if hasattr(self, 'batch_urls') and len(self.batch_urls) > 0:
+                total = len(self.batch_urls)
+                self.progress.max = total
+                self.progress.value = 0
+                self.progress.style.visibility = 'visible'
 
-            # show finished layout
+                for index, url in enumerate(self.batch_urls):
+                    self.download_button.text = f"Downloading {index+1} of {total}..."
+                    
+                    ext = "mp4" if ".mp4" in url or "mux.com" in url else "jpg"
+                    filename = f"{self.filename_input.value}_{index+1}"
+
+                    # Empty hook to suppress individual file progress logging
+                    def batch_hook(d): pass
+
+                    await dl_vsco_async(url, get_dest_path(), filename, ext, batch_hook)
+                    self.progress.value = index + 1
+                    
+            # --- SINGLE FILE DOWNLOAD ---
+            else:
+                pb = self.progress
+                ph = await create_progress_hook(pb)
+                await dl_vsco_async(self.current_download_url, get_dest_path(), self.filename_input.value, self.current_ext, ph)
+                self.progress.stop()
+                self.progress.max = 100
+                self.progress.value = 100
+
             self.download_button.text = "Finished!"
             self.url_input.enabled = True
             self.paste_button.enabled = True
             self.filename_input.enabled = True
             
-            # --- CRITICAL FIX: Re-apply Native iOS Styling AFTER setting the image ---
-            import sys
-            if sys.platform == 'ios':
-                try:
-                    native_img_view = self.image_view._impl.native
-                    native_img_view.contentMode = 2 # UIViewContentModeScaleAspectFill
-                    native_img_view.clipsToBounds = True
-                    native_img_view.layer.cornerRadius = 16.0
-                except Exception as e:
-                    print(f"Could not re-apply iOS native image styling: {e}")
-            # -------------------------------------------------------------------------
-            
-            print("finished showing finished layout!")
-            
         except Exception as e:
             print(f"Download failed: {e}")
             self.download_button.text = "Error"
-            self.download_button.enabled = True # re-enable so they can try again
+            self.download_button.enabled = True
             self.progress.stop()
             self.progress.style.visibility = 'hidden'
             self.url_input.enabled = True
             self.paste_button.enabled = True
             self.filename_input.enabled = True
-            await self.main_window.dialog(
-                toga.InfoDialog("Download Failed", str(e))
-            )
+            await self.main_window.dialog(toga.InfoDialog("Download Failed", str(e)))
 
 
 def main():
