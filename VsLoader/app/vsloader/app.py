@@ -492,15 +492,15 @@ class VsLoader(toga.App):
         self.url_input.enabled = False
         self.filename_input.enabled = False
 
-        # hide preview widgets
+        # hide preview widgets EXCEPT the download button
         self.image_view.style.visibility = 'hidden'
         self.filename_input_label.style.visibility = 'hidden'
         self.filename_input.style.visibility = 'hidden'
-        self.download_button.style.visibility = 'hidden'
 
-        # update download button
-        self.download_button.text = "Download"
-        self.download_button.enabled = True
+        # update download button for the initial loading state
+        self.download_button.style.visibility = 'visible'
+        self.download_button.text = "Loading..."
+        self.download_button.enabled = False
 
         # update paste button
         self.paste_button.enabled = False
@@ -580,6 +580,7 @@ class VsLoader(toga.App):
             self.filename_input.value = filename
             
             # Update button UI if a batch was loaded
+            self.download_button.enabled = True
             if hasattr(self, 'batch_urls') and len(self.batch_urls) > 1:
                 self.download_button.text = f"Download {len(self.batch_urls)} Items"
             else:
@@ -777,76 +778,60 @@ class VsLoader(toga.App):
                             self.batch_urls.append(dlu)
 
                     print(f"[LOG] Phase 1 Complete. Found {len(self.batch_urls)} initial items.")
+                    
+                    # --- Sync the UI button with the initial Phase 1 count ---
+                    self.download_button.text = f"Loading {len(self.batch_urls)} Items..."
 
-                    # --- PHASE 2: Pagination Hijacking ---
-                    print("[LOG] Phase 2: Attempting to hijack browser fetch to steal API headers...")
+                    # --- PHASE 2: Offline API Extraction (The Kotlin Way) ---
+                    print("[LOG] Phase 2: Extracting API credentials directly from DOM...")
                     
                     intercepted_json = None
-                    timeout = 8.0 # We don't need 15 seconds. If it fires, it fires quickly.
-                    poll_interval = 0.5
-                    elapsed = 0.0
-
-                    js_hijack = """
-                    (function() {
-                        if (!window.vscoHijacked) {
-                            window.vscoHijacked = true;
-                            window.vscoApiInfo = null;
-                            const origFetch = window.fetch;
-                            window.fetch = async function(resource, options) {
-                                const url = typeof resource === 'string' ? resource : resource.url;
-                                if (url && (url.includes('medias/profile') || url.includes('medias/videos') || url.includes('medias/collection'))) {
-                                    let extractedHeaders = {};
-                                    if (options && options.headers) {
-                                        if (options.headers instanceof Headers) {
-                                            options.headers.forEach((value, key) => { extractedHeaders[key] = value; });
-                                        } else {
-                                            extractedHeaders = options.headers;
-                                        }
-                                    }
-                                    window.vscoApiInfo = { url: url, headers: extractedHeaders };
-                                }
-                                return origFetch.apply(this, arguments);
-                            };
-                        }
-                        // Force a scroll to physically trigger VSCO's API pagination
-                        window.scrollTo(0, document.body.scrollHeight);
-                        setTimeout(() => window.scrollTo(0, document.body.scrollHeight - 100), 100);
-                        setTimeout(() => window.scrollTo(0, document.body.scrollHeight), 200);
+                    
+                    # 1. Extract the Site ID (User ID)
+                    site_id_match = re.search(r'vsco://user/(\d+)', raw_html)
+                    if not site_id_match:
+                        site_id_match = re.search(r'"site_?id"\s*:\s*"?(\d+)"?', raw_html, re.IGNORECASE)
                         
-                        return window.vscoApiInfo ? JSON.stringify(window.vscoApiInfo) : null;
-                    })();
-                    """
-
-                    while elapsed < timeout:
-                        await asyncio.sleep(poll_interval)
-                        elapsed += poll_interval
-                        
-                        raw_intercept = await self.main_webview.evaluate_javascript(js_hijack)
-                        
-                        # --- SAFETY FIX 1: Strict type handling for iOS WebKit ---
-                        if raw_intercept is None:
-                            continue
+                    site_id = site_id_match.group(1) if site_id_match else None
+                    print(f"[LOG] Extracted Site ID: {site_id}")
+                    
+                    # 2. Extract the Bearer Token
+                    token = None
+                    
+                    # Pattern A: Literally "Bearer <token>"
+                    t_match = re.search(r'(Bearer [a-zA-Z0-9\-\_\.]+)', raw_html)
+                    if t_match:
+                        token = t_match.group(1)
+                    else:
+                        # Pattern B: Next.js/Redux JSON {"tkn": "hex..."} or {"token": "hex..."}
+                        t_match = re.search(r'"t(?:oke)?n"\s*:\s*"([a-fA-F0-9]{30,50})"', raw_html)
+                        if t_match:
+                            token = f"Bearer {t_match.group(1)}"
                             
-                        # If iOS leaks a raw NSString object, decode it natively
-                        if hasattr(raw_intercept, 'UTF8String'):
-                            try:
-                                intercepted_str = raw_intercept.UTF8String().decode('utf-8')
-                            except Exception:
-                                intercepted_str = str(raw_intercept)
-                        else:
-                            intercepted_str = str(raw_intercept)
-                            
-                        # Ensure the string is actually JSON before breaking the loop
-                        if intercepted_str and intercepted_str not in ["null", "None", "", "undefined"]:
-                            intercepted_json = intercepted_str
-                            print(f"[LOG] API Intercepted successfully in {elapsed:.2f} seconds!")
-                            break
-
+                    if token:
+                        print(f"[LOG] Extracted Bearer Token: {token[:15]}...")
+                    else:
+                        print("[LOG] Warning: Could not find Bearer token in HTML. Falling back to Master Visitor Token.")
+                        # Fallback: The long-standing VSCO public visitor token
+                        token = "Bearer 7356455548d0a1d886db010883388d08be84d0c9"
+                        
+                    # 3. Construct the API Payload manually
+                    if site_id and token:
+                        base_url = f"https://vsco.co/api/3.0/medias/profile?site_id={site_id}"
+                        intercepted_json = json.dumps({
+                            "url": base_url,
+                            "headers": {
+                                "Authorization": token,
+                                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15"
+                            }
+                        })
+                        print("[LOG] API Payload successfully constructed offline!")
+                    
                     if intercepted_json:
                         print("[LOG] Moving to fetch_profile_media recursive loop...")
                         await self.fetch_profile_media(intercepted_json)
                     else:
-                        print("[LOG] WARNING: Timed out intercepting API. Proceeding with Phase 1 items only.")
+                        print("[LOG] WARNING: Failed to extract credentials offline. Proceeding with Phase 1 items only.")
 
                     if not self.batch_urls:
                         print("[LOG] FATAL: No media found on this profile.")
@@ -941,12 +926,19 @@ class VsLoader(toga.App):
             current_url = base_url + urllib.parse.quote(cursor)
             print(f"[LOG] Fetching API page {len(visited_cursors) + 1}...")
             
+            # Upgraded JS: Catches HTTP status codes and detailed fetch errors!
             js_fetch = f"""
             window.vscoFetchResult = "PENDING";
             fetch("{current_url}", {{headers: {json.dumps(headers)}}})
-                .then(res => res.text())
+                .then(async res => {{
+                    const text = await res.text();
+                    // If the server rejects us, append the status code to the front!
+                    return res.ok ? text : "HTTP_ERROR_" + res.status + ": " + text;
+                }})
                 .then(text => window.vscoFetchResult = text)
-                .catch(err => window.vscoFetchResult = "ERROR");
+                .catch(err => window.vscoFetchResult = "FETCH_ERROR: " + err.message);
+            
+            "STARTED";
             """
             await self.main_webview.evaluate_javascript(js_fetch)
             
@@ -954,9 +946,8 @@ class VsLoader(toga.App):
             while response_text == "PENDING":
                 raw_response = await self.main_webview.evaluate_javascript("window.vscoFetchResult")
                 
-                # Apply the same strict iOS WebKit decoding here
                 if raw_response is None:
-                    pass # Keep response_text as "PENDING"
+                    pass
                 elif hasattr(raw_response, 'UTF8String'):
                     try:
                         response_text = raw_response.UTF8String().decode('utf-8')
@@ -967,41 +958,81 @@ class VsLoader(toga.App):
                     
                 await asyncio.sleep(0.1)
                 
-            if not response_text or response_text == "ERROR":
-                print("[LOG] API fetch returned ERROR or was empty. Stopping recursion.")
+            if not response_text or response_text.startswith("FETCH_ERROR"):
+                print(f"[LOG] API fetch failed entirely: {response_text}")
                 break
-
-            # Parse JSON string for media URLs safely using Regex
+                
+            if response_text.startswith("HTTP_ERROR"):
+                print(f"[LOG] FATAL: Server rejected API call. Response: {response_text[:150]}")
+                break
+                
             items_added = 0
-            
-            # Match both responsive_url and responsiveUrl
-            img_matches = re.findall(r'"responsive_?[uU]rl"\s*:\s*"([^"]+)"', response_text)
-            for dlu in img_matches:
-                dlu = "https://" + dlu.replace('\\/', '/').replace('\\u002F', '/').split('?')[0]
-                if dlu not in self.batch_urls:
-                    self.batch_urls.append(dlu)
-                    items_added += 1
+            cursor_val = None
 
-            # Match videos in JSON via Mux IDs
-            mux_matches = re.findall(r'stream\.mux\.com(?:/|\\/|\\u002F)([a-zA-Z0-9_-]+)', response_text)
-            for playback_id in mux_matches:
-                dlu = f"https://stream.mux.com/{playback_id}/high.mp4"
-                if dlu not in self.batch_urls:
-                    self.batch_urls.append(dlu)
-                    items_added += 1
+            # --- THE FINAL FIX: Clean JSON Dictionary Parsing ---
+            try:
+                # We bypassed the browser and hit the API directly, so it's clean JSON!
+                api_data = json.loads(response_text)
+                
+                # 1. Safely extract media items from the array
+                for item in api_data.get("media", []):
+                    dlu = None
+                    
+                    # Check for Videos
+                    if "video" in item and item["video"]:
+                        if "mux_playback_id" in item["video"]:
+                            dlu = f"https://stream.mux.com/{item['video']['mux_playback_id']}/high.mp4"
+                        elif "video_url" in item["video"]:
+                            dlu = item["video"]["video_url"]
+                            
+                    # Check for Images
+                    elif "image" in item and item["image"]:
+                        if "responsive_url" in item["image"]:
+                            dlu = item["image"]["responsive_url"]
+                        elif "adaptive_base" in item["image"]: # <--- This catches what we saw in your log!
+                            dlu = "im.vsco.co" + item["image"]["adaptive_base"]
+                            
+                    # Clean and queue the URL
+                    if dlu:
+                        if not dlu.startswith("http"):
+                            dlu = "https://" + dlu
+                        dlu = dlu.replace('\\/', '/').replace('\\u002F', '/').split('?')[0]
+                        
+                        if dlu not in self.batch_urls:
+                            self.batch_urls.append(dlu)
+                            items_added += 1
+                
+                # 2. Extract the Next Cursor directly from the dictionary
+                cursor_val = api_data.get("next_cursor") or api_data.get("cursor")
+                
+            except Exception as e:
+                print(f"[LOG] Direct JSON parse failed, falling back to Regex... {e}")
+                
+                # Regex Fallback just in case VSCO scrambles the JSON structure
+                img_matches = re.findall(r'"(?:responsive_?[uU]rl|adaptive_base)"\s*:\s*"([^"]+)"', response_text)
+                for dlu in img_matches:
+                    if dlu.startswith("/i/"): dlu = "im.vsco.co" + dlu
+                    if not dlu.startswith("http"): dlu = "https://" + dlu
+                    dlu = dlu.replace('\\/', '/').replace('\\u002F', '/').split('?')[0]
+                    if dlu not in self.batch_urls:
+                        self.batch_urls.append(dlu)
+                        items_added += 1
+                        
+                cursor_match = re.search(r'"next_cursor"\s*:\s*"([^"]+)"', response_text)
+                if cursor_match:
+                    cursor_val = cursor_match.group(1)
 
             print(f"[LOG] Added {items_added} items from API page {len(visited_cursors) + 1}. Total queue: {len(self.batch_urls)}")
+            
+            # --- NEW: Sync the UI button with the ongoing Phase 2 count ---
+            self.download_button.text = f"Loading {len(self.batch_urls)} Items..."
 
-            if "next_cursor" in response_text and items_added > 0:
-                cursor_start = response_text.find("next_cursor")
-                match = re.search(r'"next_cursor"\s*:\s*"([^"]+)"', response_text[cursor_start:])
-                if match:
-                    cursor_val = match.group(1)
-                    if cursor_val and cursor_val != "null" and cursor_val not in visited_cursors:
-                        visited_cursors.add(cursor_val)
-                        cursor = cursor_val
-                        await asyncio.sleep(0.3)
-                        continue
+            # Loop back if we found a valid cursor
+            if cursor_val and str(cursor_val) != "null" and cursor_val not in visited_cursors:
+                visited_cursors.add(cursor_val)
+                cursor = cursor_val
+                await asyncio.sleep(0.3) # Give the server a quick breather
+                continue
             
             print("[LOG] No next_cursor found, or items exhausted. Ending API loop.")
             break
@@ -1090,6 +1121,15 @@ class VsLoader(toga.App):
     async def download_input(self, widget):
         self.app.main_window.content = self.app.main_window.content
         await self.show_downloading_layout()
+        
+        # Prevent screen sleep during download
+        if sys.platform == 'ios':
+            try:
+                from rubicon.objc import ObjCClass
+                UIApplication = ObjCClass("UIApplication")
+                UIApplication.sharedApplication.idleTimerDisabled = True
+            except Exception as e:
+                print(f"Could not disable idle timer: {e}")
 
         try:
             # --- BATCH DOWNLOAD LOOP ---
@@ -1100,7 +1140,7 @@ class VsLoader(toga.App):
                 self.progress.style.visibility = 'visible'
 
                 for index, url in enumerate(self.batch_urls):
-                    self.download_button.text = f"Downloading {index+1} of {total}..."
+                    self.download_button.text = f"Downloading {index+1} of {total}...\nPlease keep app open."
                     
                     ext = "mp4" if ".mp4" in url or "mux.com" in url else "jpg"
                     filename = f"{self.filename_input.value}_{index+1}"
@@ -1124,6 +1164,13 @@ class VsLoader(toga.App):
             self.url_input.enabled = True
             self.paste_button.enabled = True
             self.filename_input.enabled = True
+            
+            # Allow screen sleep after download finished
+            if sys.platform == 'ios':
+                try:
+                    UIApplication.sharedApplication.idleTimerDisabled = False
+                except Exception:
+                    pass
             
         except Exception as e:
             print(f"Download failed: {e}")
