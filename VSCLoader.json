@@ -1,0 +1,54 @@
+{
+  "name": "My Example Source",
+  "subtitle": "A source for all of my apps",
+  "description": "Welcome to my source! Here you'll find all of my apps.",
+  "iconURL": "https://i.imgur.com/pqIZoZo.jpeg",
+  "website": "https://altstudio.app",
+  "patreonURL": "https://patreon.com/altstudio",
+  "tintColor": "#6156e2",
+  "featuredApps": [],
+  "apps": [
+    {
+      "name": "VSCLoader: VSCO Downloader",
+      "bundleIdentifier": "green.mobileapps.vsloader",
+      "marketplaceID": "6766561197",
+      "developerName": "Green Mobile",
+      "subtitle": "VSCO Downloader for Posts & Profiles",
+      "localizedDescription": "VSCLoader is the perfect tool for saving and organizing your favorite moments.  Save photos, videos, and profiles, and never lose your precious media!\n\nInstantly save links to photos, videos and profiles.\n\nSimple, efficient UI design.\n\nDisclaimer: VSCLoader is not affiliated with VSCO.",
+      "iconURL": "https://i.imgur.com/y91vF5N.png",
+      "tintColor": "#000000",
+      "category": "photo-video",
+      "screenshots": {
+        "iphone": [
+          "https://i.imgur.com/HalHJwk.jpeg",
+          "https://i.imgur.com/X6OXzZA.jpeg",
+          "https://i.imgur.com/WIe5hVN.jpeg",
+          "https://i.imgur.com/nJszRTR.jpeg"
+        ],
+        "ipad": [
+          "https://i.imgur.com/5sqFf0a.jpeg",
+          "https://i.imgur.com/a141DkL.jpeg",
+          "https://i.imgur.com/vlBRhr4.jpeg",
+          "https://i.imgur.com/FGDv3qw.jpeg"
+        ]
+      },
+      "versions": [
+        {
+          "downloadURL": "https://github.com/mvxGREEN/VsLoader/releases/download/1.0.2/e48fece8-57de-49d1-9365-41ce749f679a.zip",
+          "size": 25600000,
+          "version": "1.0.2",
+          "buildVersion": "8",
+          "date": "2026-05-27T15:46:00-05:00",
+          "localizedDescription": "NEW FEATURE: added batch download support for profiles and collections!",
+          "minOSVersion": "13.0"
+        }
+      ],
+      "appPermissions": {
+        "entitlements": [],
+        "privacy": {}
+      },
+      "patreon": {}
+    }
+  ],
+  "news": []
+}
