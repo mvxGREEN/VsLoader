@@ -1,12 +1,16 @@
 {
-  "name": "My Example Source",
-  "subtitle": "A source for all of my apps",
-  "description": "Welcome to my source! Here you'll find all of my apps.",
-  "iconURL": "https://i.imgur.com/pqIZoZo.jpeg",
-  "website": "https://altstudio.app",
-  "patreonURL": "https://patreon.com/altstudio",
-  "tintColor": "#6156e2",
-  "featuredApps": [],
+  "name": "Green Mobile Source",
+  "subtitle": "Green Mobile Apps",
+  "description": "Downloaders, Editors, Players and more!  Please enjoy responsibly <3",
+  "iconURL": "https://mobileapps.green/the_gma_logo.png",
+  "website": "https://mobileapps.green",
+  "identifier": "green.mobileapps.source",
+  "fediUsername": "greenmobile"
+  "patreonURL": "https://www.patreon.com/cw/GreenMobileApps",
+  "tintColor": "#1F6427",
+  "featuredApps": [
+    "green.mobileapps.vsloader"
+  ],
   "apps": [
     {
       "name": "VSCLoader: VSCO Downloader",
